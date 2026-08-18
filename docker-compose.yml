@@ -1,29 +1,32 @@
-# Attire RMS — local PostgreSQL only (this project).
-# From repo root: npm run docker:up
-# Stop: npm run docker:down
+# GV Nutrition RMS — OPTIONAL local PostgreSQL. Not needed if you use Supabase dev
+# (which is the current setup — see backend/.env).
+# From repo root: npm run docker:up   /   Stop: npm run docker:down
 #
-# If port 5432 is already taken, change "5432:5432" below to e.g. "55432:5432"
-# and set DATABASE_URL in backend/.env to use that host port.
+# Everything here is namespaced to gvnutrition and uses host port 55432 so it can
+# NEVER collide with Attire's local Postgres (attirebygv-postgres on 5432) or,
+# worse, attach to Attire's data volume.
+#
+# If you do use this, set DATABASE_URL in backend/.env to port 55432.
 
-name: attirebygv-rms
+name: gvnutrition-rms
 
 services:
   postgres:
     build:
       context: ./docker/postgres
       dockerfile: Dockerfile
-    image: attirebygv-rms-postgres:local
-    container_name: attirebygv-postgres
+    image: gvnutrition-rms-postgres:local
+    container_name: gvnutrition-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: rms
       POSTGRES_PASSWORD: rms_local_dev
       POSTGRES_DB: rms_dev
     ports:
-      - "5432:5432"
+      - "55432:5432"
     volumes:
-      - attirebygv_postgres_data:/var/lib/postgresql/data
+      - gvnutrition_postgres_data:/var/lib/postgresql/data
 
 volumes:
-  attirebygv_postgres_data:
-    name: attirebygv_postgres_data
+  gvnutrition_postgres_data:
+    name: gvnutrition_postgres_data

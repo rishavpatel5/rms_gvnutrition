@@ -22,9 +22,10 @@ type OrderReportRow = Prisma.OrderGetPayload<{
       include: {
         variant: {
           include: {
-            product: { select: { id: true; name: true; slug: true; kind: true } };
-            color: true;
-            size: true;
+            product: { select: { id: true; name: true; slug: true; kind: true; hsnCode: true } };
+            brand: true;
+            flavour: true;
+            packSize: true;
           };
         };
       };
@@ -89,7 +90,7 @@ export function serializeOrderForReport(row: OrderReportRow) {
     })),
     lines: row.items.map((it) => {
       const p = it.variant.product;
-      const variantLabel = [it.variant.color?.name, it.variant.size?.label]
+      const variantLabel = [it.variant.brand?.name, it.variant.flavour?.name, it.variant.packSize?.label]
         .filter(Boolean)
         .join(" / ");
       const lineGst = it.cgstAmount.plus(it.sgstAmount).plus(it.igstAmount);
@@ -100,8 +101,10 @@ export function serializeOrderForReport(row: OrderReportRow) {
         sku: it.variant.sku,
         productName: p.name,
         productKind: p.kind,
-        colorName: it.variant.color?.name ?? null,
-        sizeLabel: it.variant.size?.label ?? null,
+        hsnCode: p.hsnCode ?? null,
+        brandName: it.variant.brand?.name ?? null,
+        flavourName: it.variant.flavour?.name ?? null,
+        packSizeLabel: it.variant.packSize?.label ?? null,
         variantLabel: variantLabel || "—",
         quantity: it.quantity,
         unitPrice: dec4(it.unitPrice),

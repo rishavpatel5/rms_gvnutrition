@@ -1,4 +1,6 @@
-// Gym Clothing & Accessories RMS — Phase 2 schema
+// GV Nutrition RMS — supplements & nutrition retail schema.
+// Adapted from the Attire by GV engine: all money math, the inventory ledger and
+// the GST engine are UNCHANGED. Only the product model and branding differ.
 // PostgreSQL / Supabase compatible. Use migrations only (no db-specific hacks).
 
 generator client {
@@ -64,32 +66,19 @@ model RefreshToken {
 }
 
 // ---------------------------------------------------------------------------
-// Catalog: categories, colors, sizes, products, variants, media
+// Catalog: brands, flavours, pack sizes, products, variants, media
 // ---------------------------------------------------------------------------
 
-model Category {
-  id          String     @id @default(cuid())
-  name        String
-  slug        String     @unique
-  description String?
-  parentId    String?    @map("parent_id")
-  sortOrder   Int        @default(0) @map("sort_order")
-  isActive    Boolean    @default(true) @map("is_active")
-  createdAt   DateTime   @default(now()) @map("created_at")
-  updatedAt   DateTime   @updatedAt @map("updated_at")
-
-  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
-  children Category[] @relation("CategoryHierarchy")
-  products Product[]
-
-  @@index([parentId])
-  @@map("categories")
-}
-
-model Color {
+/// Manufacturer (Optimum Nutrition, MuscleBlaze, …). A managed entity rather than
+/// free text so brand-wise filtering and reporting cannot fragment into
+/// "ON" / "Optimum" / "optimum nutrition". Owner-editable.
+///
+/// NOTE: product categories were REMOVED from this system at the owner's request.
+/// Brand is the grouping that matters here; do not reintroduce a Category model.
+model Brand {
   id        String   @id @default(cuid())
-  name      String
-  hexCode   String?  @map("hex_code")
+  name      String   @unique
+  slug      String   @unique
   sortOrder Int      @default(0) @map("sort_order")
   isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at")
@@ -97,35 +86,60 @@ model Color {
 
   variants ProductVariant[]
 
-  @@unique([name])
-  @@map("colors")
+  @@map("brands")
 }
 
-model Size {
+/// First of the two optional per-SKU attributes (was Colour in the apparel system).
+/// Seeded with only Chocolate + Unflavoured; the owner adds the rest via the UI.
+model Flavour {
   id        String   @id @default(cuid())
+  name      String   @unique
+  sortOrder Int      @default(0) @map("sort_order")
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  variants ProductVariant[]
+
+  @@map("flavours")
+}
+
+/// How a pack is measured. Nutrition packs are not ordinal like clothing sizes —
+/// they are magnitudes in three incompatible units.
+enum PackSizeMeasure {
+  WEIGHT // grams / kilograms — whey, gainer, creatine, oats
+  VOLUME // millilitres / litres — liquid supplements
+  COUNT  // pieces — tablets, capsules
+  SACHET // single-serve packets in a box — e.g. "30 sachets"
+}
+
+/// Second of the two optional per-SKU attributes (was Size). A SHARED table:
+/// "1kg" is ONE row reused by every product that needs it, not free text per product.
+model PackSize {
+  id        String          @id @default(cuid())
+  /// Display label exactly as staff say it at the counter: "1kg", "500ml", "60 tablets".
   label     String
-  code      String   @unique
-  sortOrder Int      @default(0) @map("sort_order")
-  isActive  Boolean  @default(true) @map("is_active")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  code      String          @unique
+  measure   PackSizeMeasure
+  /// Normalized magnitude used for sorting WITHIN a measure: grams for WEIGHT,
+  /// millilitres for VOLUME, pieces for COUNT. Without this, "500g" sorts before
+  /// "1kg" alphabetically and every listing looks broken. Never compare across measures.
+  normalizedValue Decimal   @map("normalized_value") @db.Decimal(12, 3)
+  sortOrder Int             @default(0) @map("sort_order")
+  isActive  Boolean         @default(true) @map("is_active")
+  createdAt DateTime        @default(now()) @map("created_at")
+  updatedAt DateTime        @updatedAt @map("updated_at")
 
   variants ProductVariant[]
 
-  @@map("sizes")
+  @@unique([measure, label])
+  @@index([measure, normalizedValue])
+  @@map("pack_sizes")
 }
 
 enum ProductKind {
-  APPAREL
+  SUPPLEMENT
   ACCESSORY
-}
-
-enum ProductGender {
-  MENS
-  WOMENS
-  UNISEX
-  KIDS
-  NOT_APPLICABLE
 }
 
 enum GstPricingMode {
@@ -134,24 +148,21 @@ enum GstPricingMode {
 }
 
 model Product {
-  id          String        @id @default(cuid())
+  id          String      @id @default(cuid())
   name        String
-  slug        String        @unique
-  brand       String?
+  slug        String      @unique
   kind        ProductKind
-  gender      ProductGender @default(UNISEX)
-  categoryId  String        @map("category_id")
-  isActive    Boolean       @default(true) @map("is_active")
-  createdAt   DateTime      @default(now()) @map("created_at")
-  updatedAt   DateTime      @updatedAt @map("updated_at")
+  /// Optional HSN code. Entered once per product; printed on the invoice only
+  /// when filled, so a blank costs nothing.
+  hsnCode     String?     @map("hsn_code")
+  isActive    Boolean     @default(true) @map("is_active")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
 
-  category Category         @relation(fields: [categoryId], references: [id])
   variants ProductVariant[]
   offerProducts OfferProduct[]
 
-  @@index([categoryId])
   @@index([kind, isActive])
-  @@index([gender])
   @@map("products")
 }
 
@@ -167,15 +178,22 @@ model ProductVariant {
   sgstRate   Decimal  @default(0) @map("sgst_rate") @db.Decimal(6, 3)
   igstRate   Decimal  @default(0) @map("igst_rate") @db.Decimal(6, 3)
   lowStockThreshold Int? @map("low_stock_threshold")
-  colorId    String?  @map("color_id")
-  sizeId     String?  @map("size_id")
+  /// Manufacturer of THIS item. Brand sits here, not on the product, so that
+  /// "Whey Protein · Chocolate · 500g" from two companies are two distinct
+  /// variants of one product, each with its own cost, price and stock.
+  brandId    String?  @map("brand_id")
+  /// Both attributes stay OPTIONAL — unflavoured creatine or a plain shaker
+  /// may leave either blank, exactly as Attire allowed blank colour/size.
+  flavourId  String?  @map("flavour_id")
+  packSizeId String?  @map("pack_size_id")
   isActive   Boolean  @default(true) @map("is_active")
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
   product   Product   @relation(fields: [productId], references: [id], onDelete: Restrict)
-  color     Color?    @relation(fields: [colorId], references: [id], onDelete: Restrict)
-  size      Size?     @relation(fields: [sizeId], references: [id], onDelete: Restrict)
+  brand     Brand?    @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  flavour   Flavour?  @relation(fields: [flavourId], references: [id], onDelete: Restrict)
+  packSize  PackSize? @relation(fields: [packSizeId], references: [id], onDelete: Restrict)
   inventory InventoryBalance?
   logs      InventoryLog[]
   orderItems           OrderItem[]
@@ -184,8 +202,8 @@ model ProductVariant {
   stockAdjustmentLines StockAdjustmentLine[]
 
   @@index([productId])
-  @@index([colorId])
-  @@index([sizeId])
+  @@index([flavourId])
+  @@index([packSizeId])
   @@map("product_variants")
 }
 
@@ -248,6 +266,10 @@ model InventoryLog {
 
 enum StockAdjustmentReason {
   DAMAGE
+  /// Manual expiry write-off. NO expiry dates are captured at purchase time —
+  /// staff spot an expired product on the shelf and write it off here. Kept
+  /// SEPARATE from DAMAGE so expiry loss is reportable on its own.
+  EXPIRED
   SHRINKAGE
   FOUND
   CORRECTION
@@ -295,8 +317,6 @@ model Customer {
   email              String?   @unique
   fullName           String    @map("full_name")
   notes              String?
-  preferredCategories Json?    @map("preferred_categories")
-  preferredSizes      Json?     @map("preferred_sizes")
   marketingOptIn      Boolean   @default(false) @map("marketing_opt_in")
   createdAt           DateTime  @default(now()) @map("created_at")
   updatedAt           DateTime  @updatedAt @map("updated_at")

@@ -80,6 +80,15 @@ type Summary = {
   monthly: { month: string; category: string; total: number }[];
   giveawayUnits: number;
   promotionalCost: number;
+  /** Manual stock write-offs, valued at WAC. Expiry is reported on its own. */
+  expiredUnits: number;
+  expiredCost: number;
+  /** Informational: WAC + the GST paid on it, which is unrecoverable once binned. */
+  expiredCostInclGst: number;
+  otherWriteOffUnits: number;
+  otherWriteOffCost: number;
+  writeOffCost: number;
+  writeOffByReason: { reason: string; units: number; cost: number; costInclGst: number }[];
 };
 
 type ApiMeta = { page: number; limit: number; total: number; totalPages: number };
@@ -513,11 +522,28 @@ export function ExpensesPage() {
           label="Net Profit"
           value={summaryLoading ? null : (summary?.netProfit ?? 0)}
           accent="border-l-primary/70"
-          hint="Revenue − expenses − promotional cost"
+          hint="Revenue − expenses − promotional cost − stock written off"
           signed
         />
       </div>
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <KpiCard
+          label="Expired Stock"
+          value={summaryLoading ? null : (summary?.expiredUnits ?? 0)}
+          accent="border-l-orange-500/70"
+          hint="Units written off as expired in period"
+          valueFormatter={(n) => n.toLocaleString("en-IN")}
+        />
+        <KpiCard
+          label="Expired Stock Cost"
+          value={summaryLoading ? null : (summary?.expiredCost ?? 0)}
+          accent="border-l-orange-600/70"
+          hint={
+            summary && summary.expiredCostInclGst > 0
+              ? `At WAC · ${fmtInr(summary.expiredCostInclGst)} incl. GST paid`
+              : "Cost of expired units at WAC"
+          }
+        />
         <KpiCard
           label="Giveaway Units"
           value={summaryLoading ? null : (summary?.giveawayUnits ?? 0)}
@@ -532,6 +558,14 @@ export function ExpensesPage() {
           hint="Cost of giveaway units at WAC / cost price"
         />
       </div>
+
+      {summary && summary.otherWriteOffCost > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Also written off this period: {summary.otherWriteOffUnits.toLocaleString("en-IN")} unit
+          {summary.otherWriteOffUnits === 1 ? "" : "s"} ({fmtInr(summary.otherWriteOffCost)}) as damage,
+          shrinkage or correction — included in net profit above.
+        </p>
+      ) : null}
 
       {/* Charts */}
       <div className="grid gap-6 lg:grid-cols-[1fr_320px]">

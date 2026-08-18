@@ -23,6 +23,7 @@ test("WAC is unaffected by returns; purchase → partial return → purchase sta
   // 2) The return removes 5 units of STOCK but creates NO purchase line — so the WAC
   //    basis (purchase lines only) is identical before and after the return.
   const wacAfterReturn = weightedAverageCost(afterFirstBuy);
+  assert.ok(wacAfterReturn);
   assert.equal(wacAfterReturn.toString(), wac1.toString());
 
   // 3) After buying 5 more @ ₹200. WAC = (10*100 + 5*200) / 15 = 133.33…

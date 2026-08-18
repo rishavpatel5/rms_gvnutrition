@@ -42,7 +42,6 @@ export function fetchSalesSeries(args: {
   to: string;
   granularity?: SalesGranularity;
   customerId?: string;
-  categoryId?: string;
 }): Promise<SalesSeriesResponse> {
   return apiGetJsonAuthed<SalesSeriesResponse>(
     `/api/v1/analytics/sales-series${qs({
@@ -50,7 +49,6 @@ export function fetchSalesSeries(args: {
       to: args.to,
       granularity: args.granularity ?? "daily",
       customerId: args.customerId,
-      categoryId: args.categoryId,
     })}`,
   );
 }
@@ -72,14 +70,12 @@ export function fetchProfitSummary(args: {
   from: string;
   to: string;
   customerId?: string;
-  categoryId?: string;
 }): Promise<ProfitSummary> {
   return apiGetJsonAuthed<ProfitSummary>(
     `/api/v1/analytics/profit/summary${qs({
       from: args.from,
       to: args.to,
       customerId: args.customerId,
-      categoryId: args.categoryId,
     })}`,
   );
 }
@@ -91,7 +87,7 @@ export type ProfitLine = {
   invoiceNumber: string | null;
   sku: string;
   productName: string;
-  colorName: string | null;
+  flavourName: string | null;
   quantity: number;
   lineTotal: number;
   isGiveaway: boolean;
@@ -106,7 +102,6 @@ export async function fetchProfitLines(args: {
   page?: number;
   limit?: number;
   customerId?: string;
-  categoryId?: string;
 }): Promise<{ items: ProfitLine[]; meta: PaginationMeta }> {
   const { data, meta } = await apiGetJsonAuthedWithMeta<ProfitLine[]>(
     `/api/v1/analytics/profit/lines${qs({
@@ -115,7 +110,6 @@ export async function fetchProfitLines(args: {
       page: args.page,
       limit: args.limit,
       customerId: args.customerId,
-      categoryId: args.categoryId,
     })}`,
   );
   return { items: data, meta: meta ?? { page: 1, limit: 20, total: 0, totalPages: 0 } };
@@ -125,8 +119,8 @@ export type ValuationRow = {
   variantId: string;
   sku: string;
   productName: string;
-  colorName: string | null;
-  sizeLabel: string | null;
+  flavourName: string | null;
+  packSizeLabel: string | null;
   quantityOnHand: number;
   unitCostWac: number | null;
   valuation: number;
@@ -152,7 +146,7 @@ export type VelocityRow = {
   variantId: string;
   sku: string;
   productName: string;
-  colorName: string | null;
+  flavourName: string | null;
   unitsSold: number;
   revenue: number;
 };
@@ -162,7 +156,6 @@ export function fetchFastMoving(args: {
   to: string;
   limit?: number;
   customerId?: string;
-  categoryId?: string;
 }): Promise<{ items: VelocityRow[] }> {
   return apiGetJsonAuthed<{ items: VelocityRow[] }>(
     `/api/v1/analytics/fast-moving${qs({
@@ -170,7 +163,6 @@ export function fetchFastMoving(args: {
       to: args.to,
       limit: args.limit,
       customerId: args.customerId,
-      categoryId: args.categoryId,
     })}`,
   );
 }
@@ -179,7 +171,7 @@ export type DeadStockRow = {
   variantId: string;
   sku: string;
   productName: string;
-  colorName: string | null;
+  flavourName: string | null;
   quantityOnHand: number;
   lastSaleAt: string | null;
   daysSinceSale: number | null;
@@ -214,14 +206,12 @@ export function fetchCustomerRetention(args: {
   from: string;
   to: string;
   customerId?: string;
-  categoryId?: string;
 }): Promise<RetentionSummary> {
   return apiGetJsonAuthed<RetentionSummary>(
     `/api/v1/analytics/customer-retention${qs({
       from: args.from,
       to: args.to,
       customerId: args.customerId,
-      categoryId: args.categoryId,
     })}`,
   );
 }
@@ -241,7 +231,6 @@ export async function fetchOfferPerformance(args: {
   page?: number;
   limit?: number;
   customerId?: string;
-  categoryId?: string;
 }): Promise<{ items: OfferRow[]; meta: PaginationMeta }> {
   const { data, meta } = await apiGetJsonAuthedWithMeta<OfferRow[]>(
     `/api/v1/analytics/offer-performance${qs({
@@ -250,7 +239,6 @@ export async function fetchOfferPerformance(args: {
       page: args.page,
       limit: args.limit,
       customerId: args.customerId,
-      categoryId: args.categoryId,
     })}`,
   );
   return { items: data, meta: meta ?? { page: 1, limit: 20, total: 0, totalPages: 0 } };
@@ -273,8 +261,8 @@ export type OrderReportLine = {
   sku: string;
   productName: string;
   productKind: string;
-  colorName: string | null;
-  sizeLabel: string | null;
+  flavourName: string | null;
+  packSizeLabel: string | null;
   variantLabel: string;
   quantity: number;
   unitPrice: string;
@@ -374,8 +362,8 @@ export type PurchaseAnalysisRow = {
   brand: string | null;
   productName: string;
   productKind: string;
-  colorName: string | null;
-  sizeLabel: string | null;
+  flavourName: string | null;
+  packSizeLabel: string | null;
   variantLabel: string;
   currentStock: number;
   threshold: number;

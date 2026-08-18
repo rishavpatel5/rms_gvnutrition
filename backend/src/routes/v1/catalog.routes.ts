@@ -13,31 +13,7 @@ export const catalogRouter = Router();
 const read = [authenticate, requireRoles(...ROLES_READ_ALL)];
 const write = [authenticate, requireRoles(...ROLES_CATALOG_WRITE)];
 
-catalogRouter.get(
-  "/categories",
-  ...read,
-  asyncHandler((req, res) => catalogController.listCategories(req, res)),
-);
-catalogRouter.get(
-  "/categories/:id",
-  ...read,
-  asyncHandler((req, res) => catalogController.getCategory(req, res)),
-);
-catalogRouter.post(
-  "/categories",
-  ...write,
-  asyncHandler((req, res) => catalogController.createCategory(req, res)),
-);
-catalogRouter.patch(
-  "/categories/:id",
-  ...write,
-  asyncHandler((req, res) => catalogController.updateCategory(req, res)),
-);
-catalogRouter.delete(
-  "/categories/:id",
-  ...write,
-  asyncHandler((req, res) => catalogController.deleteCategory(req, res)),
-);
+// Product categories were removed from this system — brand is the grouping.
 
 catalogRouter.get(
   "/products",
@@ -98,22 +74,32 @@ catalogRouter.delete(
 );
 
 catalogRouter.get(
-  "/reference/colors",
+  "/reference/flavours",
   ...read,
-  asyncHandler((req, res) => catalogController.listColors(req, res)),
+  asyncHandler((req, res) => catalogController.listFlavours(req, res)),
 );
 catalogRouter.post(
-  "/reference/colors",
+  "/reference/flavours",
   ...write,
-  asyncHandler((req, res) => catalogController.createColor(req, res)),
+  asyncHandler((req, res) => catalogController.createFlavour(req, res)),
 );
 catalogRouter.get(
-  "/reference/sizes",
+  "/reference/pack-sizes",
   ...read,
-  asyncHandler((req, res) => catalogController.listSizes(req, res)),
+  asyncHandler((req, res) => catalogController.listPackSizes(req, res)),
 );
 catalogRouter.post(
-  "/reference/sizes",
+  "/reference/pack-sizes",
   ...write,
-  asyncHandler((req, res) => catalogController.createSize(req, res)),
+  asyncHandler((req, res) => catalogController.createPackSize(req, res)),
+);
+catalogRouter.get(
+  "/reference/brands",
+  ...read,
+  asyncHandler((req, res) => catalogController.listBrands(req, res)),
+);
+catalogRouter.post(
+  "/reference/brands",
+  ...write,
+  asyncHandler((req, res) => catalogController.createBrand(req, res)),
 );

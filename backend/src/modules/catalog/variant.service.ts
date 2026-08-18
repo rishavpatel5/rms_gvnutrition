@@ -3,6 +3,7 @@ import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildMeta, parsePagination } from "../../lib/pagination.js";
 import { defaultIntraStateGstPercentages } from "../../lib/gst-defaults.js";
+import { resolveVariantUnitCosts } from "../../lib/variant-cost.js";
 
 export async function listVariantsForProduct(
   productId: string,
@@ -39,15 +40,45 @@ export async function listVariantsForProduct(
       take: limit,
       orderBy: { sku: "asc" },
       include: {
-        color: true,
-        size: true,
+        brand: true,
+        flavour: true,
+        packSize: true,
         inventory: true,
       },
     }),
     prisma.productVariant.count({ where }),
   ]);
 
-  return { items, meta: buildMeta(page, limit, total) };
+  // Cost context for the Receive stock screen: what the stock on hand averaged,
+  // and what was paid most recently. Shown next to the purchase-rate box so a
+  // supplier re-rate is obvious at the moment the rate is typed.
+  const ids = items.map((v) => v.id);
+  const [wacMap, lastRows] = await Promise.all([
+    resolveVariantUnitCosts(prisma, ids),
+    ids.length
+      ? prisma.$queryRaw<{ variant_id: string; unit_cost: string }[]>(Prisma.sql`
+          SELECT DISTINCT ON (poi.variant_id)
+            poi.variant_id,
+            poi.unit_cost_exclusive::text AS unit_cost
+          FROM purchase_order_items poi
+          INNER JOIN purchase_orders po ON po.id = poi.purchase_order_id
+          WHERE poi.quantity_received > 0
+            AND poi.variant_id IN (${Prisma.join(ids)})
+          ORDER BY poi.variant_id, po.created_at DESC
+        `)
+      : Promise.resolve([]),
+  ]);
+  const lastMap = new Map(lastRows.map((r) => [r.variant_id, r.unit_cost]));
+
+  const withCosts = items.map((v) => ({
+    ...v,
+    /** Weighted average cost of stock on hand. */
+    avgCost: (wacMap.get(v.id) ?? new Prisma.Decimal(0)).toFixed(2),
+    /** Rate paid on the most recent receive; null when never purchased. */
+    lastCost: lastMap.has(v.id) ? new Prisma.Decimal(lastMap.get(v.id)!).toFixed(2) : null,
+  }));
+
+  return { items: withCosts, meta: buildMeta(page, limit, total) };
 }
 
 export async function getVariantById(id: string) {
@@ -55,8 +86,9 @@ export async function getVariantById(id: string) {
     where: { id },
     include: {
       product: true,
-      color: true,
-      size: true,
+      brand: true,
+      flavour: true,
+      packSize: true,
       inventory: true,
     },
   });
@@ -66,9 +98,61 @@ export async function getVariantById(id: string) {
   return row;
 }
 
+/** Uppercase, hyphenated, length-capped token for one SKU segment. */
+function skuToken(value: string, max: number): string {
+  return value
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, max)
+    .replace(/-+$/, "");
+}
+
+/**
+ * Build an internal SKU as BRAND-PRODUCT-FLAVOUR-PACKSIZE.
+ *
+ * The brand tag leads, because it is what distinguishes otherwise-identical items:
+ * "Whey Protein · Chocolate · 500g" from two companies differ only by brand. Each
+ * segment is length-capped so the whole code stays inside the 64-char column even
+ * with long names. A numeric suffix is still appended if a collision somehow
+ * remains (e.g. two brands whose names truncate to the same token).
+ */
+async function generateUniqueSku(
+  productSlug: string,
+  brandId?: string | null,
+  flavourId?: string | null,
+  packSizeId?: string | null,
+): Promise<string> {
+  const [brand, flavour, packSize] = await Promise.all([
+    brandId ? prisma.brand.findUnique({ where: { id: brandId }, select: { name: true } }) : null,
+    flavourId ? prisma.flavour.findUnique({ where: { id: flavourId }, select: { name: true } }) : null,
+    packSizeId ? prisma.packSize.findUnique({ where: { id: packSizeId }, select: { code: true } }) : null,
+  ]);
+
+  const parts = [
+    brand ? skuToken(brand.name, 18) : "",
+    skuToken(productSlug, 22),
+    flavour ? skuToken(flavour.name, 12) : "",
+    packSize ? skuToken(packSize.code, 10) : "",
+  ].filter(Boolean);
+
+  const base = parts.join("-").slice(0, 58).replace(/-+$/, "") || "SKU";
+
+  let candidate = base;
+  for (let n = 2; n < 1000; n++) {
+    const clash = await prisma.productVariant.findUnique({
+      where: { sku: candidate },
+      select: { id: true },
+    });
+    if (!clash) return candidate;
+    candidate = `${base}-${n}`;
+  }
+  throw new AppError(409, "SKU_GENERATION_FAILED", "Could not generate a unique SKU");
+}
+
 export async function createVariant(input: {
   productId: string;
-  sku: string;
+  sku?: string;
   listPrice?: number;
   costPrice?: number | null;
   gstEnabled?: boolean;
@@ -77,8 +161,9 @@ export async function createVariant(input: {
   sgstRate?: number;
   igstRate?: number;
   lowStockThreshold?: number | null;
-  colorId?: string | null;
-  sizeId?: string | null;
+  brandId?: string | null;
+  flavourId?: string | null;
+  packSizeId?: string | null;
 }) {
   const product = await prisma.product.findUnique({
     where: { id: input.productId },
@@ -86,16 +171,24 @@ export async function createVariant(input: {
   if (!product) {
     throw new AppError(404, "PRODUCT_NOT_FOUND", "Product not found");
   }
-  if (input.colorId) {
-    const c = await prisma.color.findUnique({ where: { id: input.colorId } });
-    if (!c) throw new AppError(404, "COLOR_NOT_FOUND", "Color not found");
+  if (input.brandId) {
+    const b = await prisma.brand.findUnique({ where: { id: input.brandId } });
+    if (!b) throw new AppError(404, "BRAND_NOT_FOUND", "Brand not found");
   }
-  if (input.sizeId) {
-    const s = await prisma.size.findUnique({ where: { id: input.sizeId } });
-    if (!s) throw new AppError(404, "SIZE_NOT_FOUND", "Size not found");
+  if (input.flavourId) {
+    const f = await prisma.flavour.findUnique({ where: { id: input.flavourId } });
+    if (!f) throw new AppError(404, "FLAVOUR_NOT_FOUND", "Flavour not found");
+  }
+  if (input.packSizeId) {
+    const p = await prisma.packSize.findUnique({ where: { id: input.packSizeId } });
+    if (!p) throw new AppError(404, "PACK_SIZE_NOT_FOUND", "Pack size not found");
   }
 
-  const sku = input.sku.trim();
+  // SKU is generated, not typed. Format: BRAND-PRODUCT-FLAVOUR-PACKSIZE.
+  const sku = input.sku?.trim()
+    ? input.sku.trim()
+    : await generateUniqueSku(product.slug, input.brandId, input.flavourId, input.packSizeId);
+
   if (sku.length < 2 || sku.length > 64) {
     throw new AppError(400, "INVALID_SKU", "Invalid SKU length");
   }
@@ -131,8 +224,9 @@ export async function createVariant(input: {
           sgstRate: new Prisma.Decimal(sgst),
           igstRate: new Prisma.Decimal(igst),
           lowStockThreshold: input.lowStockThreshold ?? null,
-          colorId: input.colorId ?? null,
-          sizeId: input.sizeId ?? null,
+          brandId: input.brandId ?? null,
+          flavourId: input.flavourId ?? null,
+          packSizeId: input.packSizeId ?? null,
         },
       });
       await tx.inventoryBalance.create({
@@ -140,7 +234,7 @@ export async function createVariant(input: {
       });
       return tx.productVariant.findUniqueOrThrow({
         where: { id: v.id },
-        include: { color: true, size: true, inventory: true },
+        include: { brand: true, flavour: true, packSize: true, inventory: true },
       });
     } catch (e: unknown) {
       const code =
@@ -167,18 +261,23 @@ export async function updateVariant(
     sgstRate?: number;
     igstRate?: number;
     lowStockThreshold?: number | null;
-    colorId?: string | null;
-    sizeId?: string | null;
+    brandId?: string | null;
+    flavourId?: string | null;
+    packSizeId?: string | null;
     isActive?: boolean;
   },
 ) {
-  if (input.colorId) {
-    const c = await prisma.color.findUnique({ where: { id: input.colorId } });
-    if (!c) throw new AppError(404, "COLOR_NOT_FOUND", "Color not found");
+  if (input.brandId) {
+    const b = await prisma.brand.findUnique({ where: { id: input.brandId } });
+    if (!b) throw new AppError(404, "BRAND_NOT_FOUND", "Brand not found");
   }
-  if (input.sizeId) {
-    const s = await prisma.size.findUnique({ where: { id: input.sizeId } });
-    if (!s) throw new AppError(404, "SIZE_NOT_FOUND", "Size not found");
+  if (input.flavourId) {
+    const f = await prisma.flavour.findUnique({ where: { id: input.flavourId } });
+    if (!f) throw new AppError(404, "FLAVOUR_NOT_FOUND", "Flavour not found");
+  }
+  if (input.packSizeId) {
+    const p = await prisma.packSize.findUnique({ where: { id: input.packSizeId } });
+    if (!p) throw new AppError(404, "PACK_SIZE_NOT_FOUND", "Pack size not found");
   }
   try {
     return await prisma.productVariant.update({
@@ -212,11 +311,12 @@ export async function updateVariant(
         ...(input.lowStockThreshold !== undefined
           ? { lowStockThreshold: input.lowStockThreshold }
           : {}),
-        ...(input.colorId !== undefined ? { colorId: input.colorId } : {}),
-        ...(input.sizeId !== undefined ? { sizeId: input.sizeId } : {}),
+        ...(input.brandId !== undefined ? { brandId: input.brandId } : {}),
+        ...(input.flavourId !== undefined ? { flavourId: input.flavourId } : {}),
+        ...(input.packSizeId !== undefined ? { packSizeId: input.packSizeId } : {}),
         ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
       },
-      include: { color: true, size: true, inventory: true },
+      include: { brand: true, flavour: true, packSize: true, inventory: true },
     });
   } catch (e: unknown) {
     const code =
@@ -268,12 +368,14 @@ const skuLookupInclude = {
       id: true,
       name: true,
       kind: true,
-      brand: true,
-      category: { select: { name: true } },
+      hsnCode: true,
     },
   },
-  color: { select: { name: true } },
-  size: { select: { label: true } },
+  // Brand is on the VARIANT, not the product — nesting it under product.select
+  // compiles (the `as const` hides it from Prisma's checker) but 500s at runtime.
+  brand: { select: { id: true, name: true } },
+  flavour: { select: { name: true } },
+  packSize: { select: { label: true, measure: true } },
   inventory: { select: { quantity: true } },
 } as const;
 
@@ -291,9 +393,9 @@ export async function lookupVariantsBySku(query: Record<string, unknown>) {
   }
 
   // Token search: each whitespace-separated word must match somewhere
-  // (name / SKU / color / size / category / brand). This makes "camo flex"
-  // match "Camoflex" (both tokens are substrings) and "baggy black" match a
-  // Baggy product whose SKU contains "Black".
+  // (name / SKU / brand / flavour / pack size). This makes "whey chocolate"
+  // match a Whey product in the Chocolate flavour, and "creatine 250g" match
+  // by name plus pack size.
   const tokens = q.split(/\s+/).filter(Boolean);
   const matches = await prisma.productVariant.findMany({
     where: {
@@ -302,10 +404,9 @@ export async function lookupVariantsBySku(query: Record<string, unknown>) {
         OR: [
           { sku: { contains: tok, mode: "insensitive" as const } },
           { product: { name: { contains: tok, mode: "insensitive" as const } } },
-          { product: { brand: { contains: tok, mode: "insensitive" as const } } },
-          { product: { category: { name: { contains: tok, mode: "insensitive" as const } } } },
-          { color: { name: { contains: tok, mode: "insensitive" as const } } },
-          { size: { label: { contains: tok, mode: "insensitive" as const } } },
+          { brand: { name: { contains: tok, mode: "insensitive" as const } } },
+          { flavour: { name: { contains: tok, mode: "insensitive" as const } } },
+          { packSize: { label: { contains: tok, mode: "insensitive" as const } } },
         ],
       })),
     },

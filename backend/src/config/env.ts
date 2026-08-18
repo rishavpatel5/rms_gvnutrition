@@ -12,11 +12,11 @@ const envFilePath = path.join(
 const envSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-    PORT: z.coerce.number().int().positive().default(4000),
+    PORT: z.coerce.number().int().positive().default(4100),
     DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
     CORS_ORIGINS: z
       .string()
-      .default("http://localhost:5173")
+      .default("http://localhost:5273")
       .transform((s) =>
         s
           .split(",")

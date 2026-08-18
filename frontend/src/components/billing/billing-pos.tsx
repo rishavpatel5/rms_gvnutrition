@@ -11,12 +11,14 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InvoicePreviewSheet } from "@/components/billing/invoice-preview-sheet";
-import { ColorLabel } from "@/components/catalog/color-dot";
+import { BrandTag } from "@/components/catalog/brand-tag";
+import { FlavourLabel } from "@/components/catalog/flavour-label";
 import { PosCartSummary } from "@/components/billing/pos-cart-summary";
 import { PosCheckoutCustomerBlock } from "@/components/billing/pos-checkout-customer";
 import { PosLineDiscount } from "@/components/billing/pos-line-discount";
 import { PosLineGiveaway } from "@/components/billing/pos-line-giveaway";
 import { useBillingQuote } from "@/hooks/use-billing-quote";
+import { MarginHint, MarginSummary, VariantCostLine } from "@/components/billing/margin-hint";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -75,20 +77,26 @@ type PosVariant = {
   cgstRate: string | number;
   sgstRate: string | number;
   igstRate: string | number;
-  color: { name: string } | null;
-  size: { label: string; code: string } | null;
+  /** Weighted average cost per unit — basis for margin. */
+  unitCost?: string | number;
+  /** Rate paid on the most recent receive; null if never purchased. */
+  lastCost?: string | number | null;
+  /** On the variant — often the only thing separating two identical packs. */
+  brand: { id: string; name: string } | null;
+  flavour: { name: string } | null;
+  packSize: { label: string; code: string } | null;
   inventory: { quantity: number } | null;
 };
 
 type PosProduct = {
   id: string;
   name: string;
-  kind: "APPAREL" | "ACCESSORY";
+  kind: "SUPPLEMENT" | "ACCESSORY";
   variants: PosVariant[];
 };
 
 function variantLabel(v: PosVariant): string {
-  return [v.color?.name, v.size?.label].filter(Boolean).join(" / ") || "Default";
+  return [v.flavour?.name, v.packSize?.label].filter(Boolean).join(" / ") || "Default";
 }
 
 function asMoneyNumber(v: string | number): number {
@@ -189,7 +197,9 @@ export function BillingPos() {
       variantId: variant.id,
       name: selected.name,
       variantLabel: variantLabel(variant),
-      colorName: variant.color?.name ?? null,
+      brandName: variant.brand?.name ?? null,
+      unitCost: asMoneyNumber(variant.unitCost ?? 0),
+      flavourName: variant.flavour?.name ?? null,
       sku: variant.sku,
       unitPrice: asMoneyNumber(variant.listPrice),
       availableStock: variant.inventory?.quantity ?? 0,
@@ -231,7 +241,9 @@ export function BillingPos() {
             variantId: exactVariant.id,
             name: exact.name,
             variantLabel: variantLabel(exactVariant),
-            colorName: exactVariant.color?.name ?? null,
+            brandName: exactVariant.brand?.name ?? null,
+            unitCost: asMoneyNumber(exactVariant.unitCost ?? 0),
+            flavourName: exactVariant.flavour?.name ?? null,
             sku: exactVariant.sku,
             unitPrice: asMoneyNumber(exactVariant.listPrice),
             availableStock: exactVariant.inventory?.quantity ?? 0,
@@ -251,7 +263,9 @@ export function BillingPos() {
             variantId: v.id,
             name: p.name,
             variantLabel: variantLabel(v),
-            colorName: v.color?.name ?? null,
+            brandName: v.brand?.name ?? null,
+            unitCost: asMoneyNumber(v.unitCost ?? 0),
+        flavourName: v.flavour?.name ?? null,
             sku: v.sku,
             unitPrice: asMoneyNumber(v.listPrice),
             availableStock: v.inventory?.quantity ?? 0,
@@ -281,6 +295,25 @@ export function BillingPos() {
   const { quote, loading: quoteLoading, error: quoteError } = useBillingQuote();
 
   const grandTotal = quote?.totals.grandTotal ?? "0";
+
+  // Margin figures for the counter. Cost comes from the cart lines (WAC at the
+  // time the line was added); taxable value comes from the server quote, so it
+  // already reflects every item and cart discount.
+  const cartCost = useMemo(
+    () => lines.reduce((sum, l) => sum + (l.unitCost ?? 0) * l.qty, 0),
+    [lines],
+  );
+  const cartTaxable = Number(quote?.totals.taxableValue ?? 0);
+  const lineCostById = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const l of lines) m.set(l.variantId, (m.get(l.variantId) ?? 0) + (l.unitCost ?? 0) * l.qty);
+    return m;
+  }, [lines]);
+  const lineTaxableById = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const ql of quote?.lines ?? []) m.set(ql.variantId, Number(ql.taxableValue));
+    return m;
+  }, [quote]);
 
   async function completeSale() {
     if (lines.length === 0 || !quote || saleBusy) return;
@@ -467,7 +500,7 @@ export function BillingPos() {
                         >
                           <span className="font-medium">{p.name}</span>
                           <span className="text-xs text-muted-foreground">
-                            {p.kind === "APPAREL" ? "Clothing" : "Accessory"} · {p.variants.length} variants
+                            {p.kind === "SUPPLEMENT" ? "Supplement" : "Accessory"} · {p.variants.length} variants
                           </span>
                         </button>
                       </li>
@@ -499,7 +532,8 @@ export function BillingPos() {
                               : "border-border/80 bg-muted/40 hover:bg-muted",
                           )}
                         >
-                          <ColorLabel colorName={v.color?.name}>{variantLabel(v)}</ColorLabel>
+                          <BrandTag brand={v.brand?.name} className="mr-1.5" />
+                          <FlavourLabel flavour={v.flavour?.name}>{variantLabel(v)}</FlavourLabel>
                           <span className="ml-1.5 tabular-nums text-muted-foreground">
                             {money(asMoneyNumber(v.listPrice))}
                           </span>
@@ -509,6 +543,27 @@ export function BillingPos() {
                         </button>
                       ))}
                     </div>
+                    {variant && asMoneyNumber(variant.unitCost ?? 0) > 0 ? (
+                      <p className="mb-2 text-xs">
+                        <VariantCostLine
+                          taxableAtList={
+                            // Margin at LIST price, ex-GST, before any discount.
+                            variant.gstPricingMode === "INCLUSIVE"
+                              ? asMoneyNumber(variant.listPrice) /
+                                (1 +
+                                  (asMoneyNumber(variant.cgstRate) +
+                                    asMoneyNumber(variant.sgstRate) +
+                                    asMoneyNumber(variant.igstRate)) /
+                                    100)
+                              : asMoneyNumber(variant.listPrice)
+                          }
+                          wac={asMoneyNumber(variant.unitCost ?? 0)}
+                          lastCost={
+                            variant.lastCost == null ? null : asMoneyNumber(variant.lastCost)
+                          }
+                        />
+                      </p>
+                    ) : null}
                     <Button
                       type="button"
                       className="w-full rounded-xl"
@@ -520,7 +575,7 @@ export function BillingPos() {
                   </>
                 ) : (
                   <p className="text-sm text-muted-foreground">
-                    Select a product from the list to choose size or colour.
+                    Select a product from the list to choose flavour or pack size.
                   </p>
                 )}
               </CardContent>
@@ -554,9 +609,18 @@ export function BillingPos() {
                         <TableRow key={l.id}>
                           <TableCell>
                             <div className="text-sm font-medium leading-tight">{l.name}</div>
-                            <div className="text-xs text-muted-foreground">
-                              <ColorLabel colorName={l.colorName}>{l.variantLabel}</ColorLabel>
+                            <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                              <BrandTag brand={l.brandName} />
+                              <FlavourLabel flavour={l.flavourName}>{l.variantLabel}</FlavourLabel>
                             </div>
+                            {!l.isGiveaway && (l.unitCost ?? 0) > 0 ? (
+                              <div className="mt-0.5 text-[11px]">
+                                <MarginHint
+                                  taxable={lineTaxableById.get(l.variantId) ?? 0}
+                                  cost={lineCostById.get(l.variantId) ?? 0}
+                                />
+                              </div>
+                            ) : null}
                             <div className="mt-1 text-xs tabular-nums text-muted-foreground">
                               {l.isGiveaway ? (
                                 <span className="font-medium text-amber-700 dark:text-amber-400">
@@ -641,7 +705,7 @@ export function BillingPos() {
                     GST
                   </Label>
                   <p className="text-[11px] text-muted-foreground">
-                    5% apparel · 18% accessories
+                    5% supplements · 18% accessories
                   </p>
                 </div>
                 <Switch
@@ -677,6 +741,11 @@ export function BillingPos() {
               </div>
               <Separator />
               <PosCartSummary quote={quote} loading={quoteLoading} error={quoteError} />
+              {lines.length > 0 && cartCost > 0 ? (
+                <div className="mt-3">
+                  <MarginSummary taxable={cartTaxable} cost={cartCost} gstEnabled={gstEnabled} />
+                </div>
+              ) : null}
               <Button
                 type="button"
                 size="lg"

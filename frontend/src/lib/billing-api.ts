@@ -68,8 +68,8 @@ export type CorrectableVariant = {
   id: string;
   sku: string;
   isActive: boolean;
-  colorName: string | null;
-  sizeLabel: string | null;
+  flavourName: string | null;
+  packSizeLabel: string | null;
   quantity: number;
 };
 
@@ -77,8 +77,8 @@ type RawCatalogVariant = {
   id: string;
   sku: string;
   isActive: boolean;
-  color: { name: string } | null;
-  size: { label: string } | null;
+  flavour: { name: string } | null;
+  packSize: { label: string } | null;
   inventory: { quantity: number } | null;
 };
 
@@ -95,8 +95,8 @@ export async function fetchProductVariantsForCorrection(
       id: v.id,
       sku: v.sku,
       isActive: v.isActive,
-      colorName: v.color?.name ?? null,
-      sizeLabel: v.size?.label ?? null,
+      flavourName: v.flavour?.name ?? null,
+      packSizeLabel: v.packSize?.label ?? null,
       quantity: v.inventory?.quantity ?? 0,
     }));
 }

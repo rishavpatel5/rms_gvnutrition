@@ -1,47 +1,19 @@
 import type { Request, Response } from "express";
 import { getQueryRecord, parseBody } from "../../lib/http-parse.js";
-import * as categoryService from "./category.service.js";
 import * as productService from "./product.service.js";
 import * as variantService from "./variant.service.js";
 import {
-  createCategoryBodySchema,
-  createColorBodySchema,
+  createBrandBodySchema,
+  createFlavourBodySchema,
+  createPackSizeBodySchema,
   createProductBodySchema,
-  createSizeBodySchema,
   createVariantBodySchema,
-  updateCategoryBodySchema,
   updateProductBodySchema,
   updateVariantBodySchema,
 } from "./catalog.validators.js";
 
+// Product categories were removed from this system — brand is the grouping.
 export const catalogController = {
-  async listCategories(req: Request, res: Response): Promise<void> {
-    const out = await categoryService.listCategories(getQueryRecord(req));
-    res.json({ data: out.items, meta: out.meta });
-  },
-
-  async getCategory(req: Request, res: Response): Promise<void> {
-    const row = await categoryService.getCategoryById(req.params.id!);
-    res.json({ data: row });
-  },
-
-  async createCategory(req: Request, res: Response): Promise<void> {
-    const body = parseBody(createCategoryBodySchema, req.body);
-    const row = await categoryService.createCategory(body);
-    res.status(201).json({ data: row });
-  },
-
-  async updateCategory(req: Request, res: Response): Promise<void> {
-    const body = parseBody(updateCategoryBodySchema, req.body);
-    const row = await categoryService.updateCategory(req.params.id!, body);
-    res.json({ data: row });
-  },
-
-  async deleteCategory(req: Request, res: Response): Promise<void> {
-    await categoryService.deleteCategory(req.params.id!);
-    res.status(204).send();
-  },
-
   async listProducts(req: Request, res: Response): Promise<void> {
     const out = await productService.listProducts(getQueryRecord(req));
     res.json({ data: out.items, meta: out.meta });
@@ -107,25 +79,36 @@ export const catalogController = {
     res.json({ data: out });
   },
 
-  async listColors(req: Request, res: Response): Promise<void> {
-    const out = await productService.listColors(getQueryRecord(req));
+  async listFlavours(req: Request, res: Response): Promise<void> {
+    const out = await productService.listFlavours(getQueryRecord(req));
     res.json({ data: out.items, meta: out.meta });
   },
 
-  async createColor(req: Request, res: Response): Promise<void> {
-    const body = parseBody(createColorBodySchema, req.body);
-    const row = await productService.createColor(body);
+  async createFlavour(req: Request, res: Response): Promise<void> {
+    const body = parseBody(createFlavourBodySchema, req.body);
+    const row = await productService.createFlavour(body);
     res.status(201).json({ data: row });
   },
 
-  async listSizes(req: Request, res: Response): Promise<void> {
-    const out = await productService.listSizes(getQueryRecord(req));
+  async listPackSizes(req: Request, res: Response): Promise<void> {
+    const out = await productService.listPackSizes(getQueryRecord(req));
     res.json({ data: out.items, meta: out.meta });
   },
 
-  async createSize(req: Request, res: Response): Promise<void> {
-    const body = parseBody(createSizeBodySchema, req.body);
-    const row = await productService.createSize(body);
+  async createPackSize(req: Request, res: Response): Promise<void> {
+    const body = parseBody(createPackSizeBodySchema, req.body);
+    const row = await productService.createPackSize(body);
+    res.status(201).json({ data: row });
+  },
+
+  async listBrands(req: Request, res: Response): Promise<void> {
+    const out = await productService.listBrands(getQueryRecord(req));
+    res.json({ data: out.items, meta: out.meta });
+  },
+
+  async createBrand(req: Request, res: Response): Promise<void> {
+    const body = parseBody(createBrandBodySchema, req.body);
+    const row = await productService.createBrand(body);
     res.status(201).json({ data: row });
   },
 };

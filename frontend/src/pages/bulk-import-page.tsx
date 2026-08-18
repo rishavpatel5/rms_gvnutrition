@@ -25,12 +25,10 @@ type RawRow = {
   sr_no: number;
   product_name: string;
   sku: string;
-  shelf_category: string;
   kind: string;
-  gender: string;
   brand: string;
-  color: string;
-  size: string;
+  flavour: string;
+  pack_size: string;
   quantity: number;
   cost_price: number;
   list_price: number;
@@ -40,6 +38,7 @@ type RawRow = {
   low_stock_threshold: number | null;
   supplier_name: string;
   gst_inclusive: boolean;
+  hsn_code: string;
 };
 
 type ScanRowResult = {
@@ -53,12 +52,12 @@ type ScanRowResult = {
   productId?: string;
   productMatch?: { id: string; name: string; similarity: number };
   supplierId?: string;
-  categoryId?: string;
-  categoryIsNew?: boolean;
-  colorId?: string;
-  colorIsNew?: boolean;
-  sizeId?: string;
-  sizeIsNew?: boolean;
+  brandId?: string;
+  brandIsNew?: boolean;
+  flavourId?: string;
+  flavourIsNew?: boolean;
+  packSizeId?: string;
+  packSizeIsNew?: boolean;
 };
 
 type ScanResult = {
@@ -76,21 +75,19 @@ type CommitRow = {
   productId?: string;
   raw: RawRow;
   supplierId: string;
-  categoryId?: string;
-  categoryIsNew?: boolean;
-  colorId?: string;
-  colorIsNew?: boolean;
-  sizeId?: string;
-  sizeIsNew?: boolean;
+  flavourId?: string;
+  flavourIsNew?: boolean;
+  packSizeId?: string;
+  packSizeIsNew?: boolean;
 };
 
 // Step 1 — catalog only (no stock yet).
 type CatalogResult = {
   batchId: string;
   rowsImported: number;
-  newCategoriesCreated: number;
-  newColorsCreated: number;
-  newSizesCreated: number;
+  newFlavoursCreated: number;
+  newPackSizesCreated: number;
+  newBrandsCreated: number;
   newProductsCreated: number;
   newVariantsCreated: number;
 };
@@ -265,12 +262,15 @@ export function BulkImportPage() {
         productId: r.productId,
         raw: r.raw,
         supplierId: r.supplierId!,
-        categoryId: r.categoryId,
-        categoryIsNew: r.categoryIsNew,
-        colorId: r.colorId,
-        colorIsNew: r.colorIsNew,
-        sizeId: r.sizeId,
-        sizeIsNew: r.sizeIsNew,
+        // Brand MUST be forwarded. Without it the server creates no brands and
+        // every variant lands brandless — which then breaks the stock step,
+        // because rows are matched on product + brand + flavour + pack size.
+        brandId: r.brandId,
+        brandIsNew: r.brandIsNew,
+        flavourId: r.flavourId,
+        flavourIsNew: r.flavourIsNew,
+        packSizeId: r.packSizeId,
+        packSizeIsNew: r.packSizeIsNew,
       }));
   }, [scanResult]);
 
@@ -322,7 +322,7 @@ export function BulkImportPage() {
 
   // Flip every row of a product between "add variant to matched product" and
   // "create a brand-new product". Used when the fuzzy matcher picks the wrong
-  // existing product (e.g. "Acid Wash Baggy Pants" → "Acid Wash Boxy Tank").
+  // existing product (e.g. "Whey Protein Chocolate" -> "Whey Protein Vanilla").
   const overrideToNewProduct = useCallback((productName: string, makeNew: boolean) => {
     setScanResult((prev) => {
       if (!prev) return prev;
@@ -613,10 +613,10 @@ export function BulkImportPage() {
                           <td className="px-3 py-2.5 font-mono text-xs">{row.raw.sku}</td>
                           <td className="max-w-[200px] truncate px-3 py-2.5">{row.raw.product_name}</td>
                           <td className="px-3 py-2.5 text-muted-foreground">
-                            {row.raw.color || <span className="text-muted-foreground/50">—</span>}
+                            {row.raw.flavour || <span className="text-muted-foreground/50">—</span>}
                           </td>
                           <td className="px-3 py-2.5 text-muted-foreground">
-                            {row.raw.size || <span className="text-muted-foreground/50">—</span>}
+                            {row.raw.pack_size || <span className="text-muted-foreground/50">—</span>}
                           </td>
                           <td className="px-3 py-2.5 text-right tabular-nums">{row.raw.quantity}</td>
                           <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground">
@@ -695,8 +695,8 @@ export function BulkImportPage() {
                 <StatCard label="New products" value={catalogResult.newProductsCreated} />
                 <StatCard label="New variants" value={catalogResult.newVariantsCreated} />
                 <StatCard
-                  label="New categories / colors / sizes"
-                  value={`${catalogResult.newCategoriesCreated} / ${catalogResult.newColorsCreated} / ${catalogResult.newSizesCreated}`}
+                  label="New brands / flavours / pack sizes"
+                  value={`${catalogResult.newBrandsCreated} / ${catalogResult.newFlavoursCreated} / ${catalogResult.newPackSizesCreated}`}
                 />
                 <StatCard label="Rows ready to stock" value={catalogResult.rowsImported} />
               </div>
@@ -774,8 +774,8 @@ export function BulkImportPage() {
                 <StatCard label="New products" value={catalogResult?.newProductsCreated ?? 0} />
                 <StatCard label="New variants" value={catalogResult?.newVariantsCreated ?? 0} />
                 <StatCard
-                  label="New categories / colors / sizes"
-                  value={`${catalogResult?.newCategoriesCreated ?? 0} / ${catalogResult?.newColorsCreated ?? 0} / ${catalogResult?.newSizesCreated ?? 0}`}
+                  label="New brands / flavours / pack sizes"
+                  value={`${catalogResult?.newBrandsCreated ?? 0} / ${catalogResult?.newFlavoursCreated ?? 0} / ${catalogResult?.newPackSizesCreated ?? 0}`}
                 />
               </div>
 

@@ -34,9 +34,9 @@ type LowStockBalanceRow = {
   variant: {
     id: string;
     sku: string;
-    product: { name: string; kind: "APPAREL" | "ACCESSORY" };
-    color: { name: string } | null;
-    size: { label: string } | null;
+    product: { name: string; kind: "SUPPLEMENT" | "ACCESSORY" };
+    flavour: { name: string } | null;
+    packSize: { label: string } | null;
   };
 };
 
@@ -203,7 +203,7 @@ function buildProfitSheet(
       "Invoice",
       "SKU",
       "Product",
-      "Color",
+      "Flavour",
       "Type",
       "Qty",
       "Revenue",
@@ -218,7 +218,7 @@ function buildProfitSheet(
       ln.invoiceNumber ?? "",
       ln.sku,
       ln.productName,
-      ln.colorName ?? "",
+      ln.flavourName ?? "",
       ln.isGiveaway ? "Giveaway" : "Sale",
       ln.quantity,
       ln.lineTotal,
@@ -238,14 +238,14 @@ function buildInventorySheet(
     ["Report", "Inventory valuation"],
     ["Total valuation", totalValuation],
     [],
-    ["SKU", "Product", "Color", "Size", "Qty on hand", "Unit cost WAC", "Valuation"],
+    ["SKU", "Product", "Flavour", "Size", "Qty on hand", "Unit cost WAC", "Valuation"],
   ];
   for (const r of items) {
     rows.push([
       r.sku,
       r.productName,
-      r.colorName ?? "",
-      r.sizeLabel ?? "",
+      r.flavourName ?? "",
+      r.packSizeLabel ?? "",
       r.quantityOnHand,
       r.unitCostWac ?? "",
       r.valuation,
@@ -259,10 +259,10 @@ function buildFastMovingSheet(from: string, to: string, items: VelocityRow[]): X
     ["Report", "Fast-moving"],
     ["Date range (IST)", `${from} to ${to}`],
     [],
-    ["SKU", "Product", "Color", "Units sold", "Revenue"],
+    ["SKU", "Product", "Flavour", "Units sold", "Revenue"],
   ];
   for (const r of items) {
-    rows.push([r.sku, r.productName, r.colorName ?? "", r.unitsSold, r.revenue]);
+    rows.push([r.sku, r.productName, r.flavourName ?? "", r.unitsSold, r.revenue]);
   }
   return sheetFromRows(rows);
 }
@@ -272,13 +272,13 @@ function buildDeadStockSheet(deadAfterDays: number, items: DeadStockRow[]): XLSX
     ["Report", "Dead stock"],
     ["Stale after (days)", deadAfterDays],
     [],
-    ["SKU", "Product", "Color", "Qty on hand", "Last sale", "Days since sale"],
+    ["SKU", "Product", "Flavour", "Qty on hand", "Last sale", "Days since sale"],
   ];
   for (const r of items) {
     rows.push([
       r.sku,
       r.productName,
-      r.colorName ?? "",
+      r.flavourName ?? "",
       r.quantityOnHand,
       r.lastSaleAt ? r.lastSaleAt.slice(0, 10) : "Never",
       r.daysSinceSale ?? "",
@@ -376,16 +376,16 @@ function buildLowStockSheet(threshold: number, items: LowStockBalanceRow[]): XLS
     ["Threshold (qty at or below)", threshold],
     ["Note", "Variants with on-hand quantity at or below the threshold."],
     [],
-    ["Product", "Kind", "SKU", "Color", "Size", "Qty on hand", "Status"],
+    ["Product", "Kind", "SKU", "Flavour", "Size", "Qty on hand", "Status"],
   ];
   for (const r of items) {
     const variantLabel =
-      [r.variant.color?.name, r.variant.size?.label].filter(Boolean).join(" / ") || "—";
+      [r.variant.flavour?.name, r.variant.packSize?.label].filter(Boolean).join(" / ") || "—";
     rows.push([
       r.variant.product.name,
-      r.variant.product.kind === "APPAREL" ? "Clothing" : "Accessory",
+      r.variant.product.kind === "SUPPLEMENT" ? "Supplement" : "Accessory",
       r.variant.sku,
-      r.variant.color?.name ?? "",
+      r.variant.flavour?.name ?? "",
       variantLabel,
       r.quantity,
       lowStockStatus(r.quantity, threshold),

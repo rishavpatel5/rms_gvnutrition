@@ -108,7 +108,7 @@ async function allocateInvoiceNumber(tx: Tx, refDate: Date = new Date()): Promis
       select: { nextSeq: true },
     });
     const y = istYear(refDate);
-    return `INV-${y}-${String(updated.nextSeq).padStart(7, "0")}`;
+    return `GVN-${y}-${String(updated.nextSeq).padStart(7, "0")}`;
   } catch (e: unknown) {
     const code =
       typeof e === "object" && e !== null && "code" in e
@@ -124,7 +124,7 @@ async function allocateInvoiceNumber(tx: Tx, refDate: Date = new Date()): Promis
         select: { nextSeq: true },
       });
       const y = istYear(refDate);
-      return `INV-${y}-${String(updated.nextSeq).padStart(7, "0")}`;
+      return `GVN-${y}-${String(updated.nextSeq).padStart(7, "0")}`;
     }
     throw e;
   }
@@ -324,7 +324,7 @@ export async function voidSaleOrder(input: {
 }
 
 /**
- * Correct a confirmed sale line's variant (e.g. wrong colour/size recorded) WITHOUT
+ * Correct a confirmed sale line's variant (e.g. wrong flavour/pack size recorded) WITHOUT
  * touching any money. Only same-product swaps are allowed, and every monetary field on
  * the line is preserved byte-for-byte — so totals, GST, payments and the invoice are
  * unchanged. Inventory is reconciled: the mis-sold unit is returned to the old variant and
@@ -1076,6 +1076,11 @@ export async function searchPosCatalog(query: Record<string, unknown>) {
               { name: { contains: term, mode: "insensitive" } },
               { slug: { contains: term, mode: "insensitive" } },
               ...(variantSkuMatch ? [{ variants: { some: variantSkuMatch } }] : []),
+              // Let the counter search by company, flavour or pack size — with
+              // brand on the variant it is often the fastest way to find an item.
+              { variants: { some: { brand: { name: { contains: term, mode: "insensitive" } } } } },
+              { variants: { some: { flavour: { name: { contains: term, mode: "insensitive" } } } } },
+              { variants: { some: { packSize: { label: { contains: term, mode: "insensitive" } } } } },
             ],
           }
         : {}),
@@ -1087,7 +1092,6 @@ export async function searchPosCatalog(query: Record<string, unknown>) {
       name: true,
       slug: true,
       kind: true,
-      gender: true,
       variants: {
         where: { isActive: true },
         orderBy: { sku: "asc" },
@@ -1101,8 +1105,9 @@ export async function searchPosCatalog(query: Record<string, unknown>) {
           cgstRate: true,
           sgstRate: true,
           igstRate: true,
-          color: { select: { id: true, name: true } },
-          size: { select: { id: true, label: true, code: true } },
+          brand: { select: { id: true, name: true } },
+          flavour: { select: { id: true, name: true } },
+          packSize: { select: { id: true, label: true, code: true } },
           inventory: { select: { quantity: true, updatedAt: true } },
         },
       },
@@ -1130,5 +1135,43 @@ export async function searchPosCatalog(query: Record<string, unknown>) {
           })
           .filter((p) => p.variants.length > 0);
 
-  return { items };
+  // Attach the unit cost so the counter can see the margin before discounting.
+  // SAME basis as COGS and giveaway costing: WAC from received purchase lines,
+  // falling back to the catalog cost price. This is READ-ONLY — it never feeds
+  // pricing, GST or valuation, it is shown so the owner knows the floor.
+  const variantIds = items.flatMap((p) => p.variants.map((v) => v.id));
+  const costs = await resolveVariantUnitCosts(prisma, variantIds);
+
+  // The MOST RECENT rate paid, alongside the average. Suppliers re-rate often, so
+  // WAC (what the stock on hand cost) and the latest rate (what a refill costs)
+  // can differ a lot. The counter needs both: WAC to price today's stock, the
+  // latest rate to notice the MRP no longer covers the next delivery.
+  const lastCostRows = variantIds.length
+    ? await prisma.$queryRaw<{ variant_id: string; unit_cost: string }[]>(Prisma.sql`
+        SELECT DISTINCT ON (poi.variant_id)
+          poi.variant_id,
+          poi.unit_cost_exclusive::text AS unit_cost
+        FROM purchase_order_items poi
+        INNER JOIN purchase_orders po ON po.id = poi.purchase_order_id
+        WHERE poi.quantity_received > 0
+          AND poi.variant_id IN (${Prisma.join(variantIds)})
+        ORDER BY poi.variant_id, po.created_at DESC
+      `)
+    : [];
+  const lastCostMap = new Map(lastCostRows.map((r) => [r.variant_id, r.unit_cost]));
+
+  const withCosts = items.map((p) => ({
+    ...p,
+    variants: p.variants.map((v) => ({
+      ...v,
+      /** Weighted average cost — the basis for margin, COGS and valuation. */
+      unitCost: (costs.get(v.id) ?? new Prisma.Decimal(0)).toFixed(2),
+      /** Rate paid on the most recent receive; null when never purchased. */
+      lastCost: lastCostMap.has(v.id)
+        ? new Prisma.Decimal(lastCostMap.get(v.id)!).toFixed(2)
+        : null,
+    })),
+  }));
+
+  return { items: withCosts };
 }

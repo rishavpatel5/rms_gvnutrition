@@ -155,17 +155,20 @@ function renderInvoice(pdf: InstanceType<typeof PDFDocument>, doc: InvoiceDocume
   y += 20;
 
   // —— Items table ——
+  // HSN sits between Variant and Qty. Product/Variant give up a little width for it;
+  // rows with no HSN print an em dash, so a blank code costs nothing.
   const cols = {
-    product: 118,
-    variant: 72,
-    qty: 28,
-    rate: 52,
-    disc: 48,
-    gst: 52,
-    total: 58,
+    product: 104,
+    variant: 62,
+    hsn: 42,
+    qty: 26,
+    rate: 50,
+    disc: 46,
+    gst: 50,
+    total: 56,
   };
   const tableW =
-    cols.product + cols.variant + cols.qty + cols.rate + cols.disc + cols.gst + cols.total;
+    cols.product + cols.variant + cols.hsn + cols.qty + cols.rate + cols.disc + cols.gst + cols.total;
 
   const drawTableHeader = (startY: number): number => {
     pdf.rect(MARGIN, startY, tableW, 18).fill(COLORS.headerBg);
@@ -174,6 +177,7 @@ function renderInvoice(pdf: InstanceType<typeof PDFDocument>, doc: InvoiceDocume
     const headers = [
       ["Product", cols.product],
       ["Variant", cols.variant],
+      ["HSN", cols.hsn],
       ["Qty", cols.qty],
       ["Rate", cols.rate],
       ["Disc.", cols.disc],
@@ -216,6 +220,7 @@ function renderInvoice(pdf: InstanceType<typeof PDFDocument>, doc: InvoiceDocume
     const cells: [string, number, "left" | "right"][] = [
       [productLabel, cols.product, "left"],
       [line.variantLabel, cols.variant, "left"],
+      [line.hsnCode || "—", cols.hsn, "left"],
       [String(line.quantity), cols.qty, "right"],
       [inr(line.unitPrice), cols.rate, "right"],
       [discAmt > 0 ? `-${inr(discAmt)}` : "—", cols.disc, "right"],

@@ -9,7 +9,8 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { ColorLabel } from "@/components/catalog/color-dot";
+import { BrandTag } from "@/components/catalog/brand-tag";
+import { FlavourLabel } from "@/components/catalog/flavour-label";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -38,15 +39,28 @@ type SearchProduct = {
   id: string;
   name: string;
   kind: string;
-  category: { name: string };
+  /** Brands come from the variants — a product can span several companies. */
+  variants?: { brand: { id: string; name: string } | null }[];
   _count?: { variants: number };
 };
+
+/** Distinct company names across a product's variants. */
+function searchProductBrands(p: SearchProduct): string[] {
+  const set = new Set<string>();
+  for (const v of p.variants ?? []) if (v.brand?.name) set.add(v.brand.name);
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
 
 type VariantRow = {
   id: string;
   sku: string;
-  color: { name: string } | null;
-  size: { label: string } | null;
+  /** Weighted average cost of stock on hand. */
+  avgCost?: string | null;
+  /** Rate paid on the most recent receive; null if never purchased. */
+  lastCost?: string | null;
+  brand: { id: string; name: string } | null;
+  flavour: { name: string } | null;
+  packSize: { label: string } | null;
 };
 
 type CartLine = {
@@ -56,7 +70,8 @@ type CartLine = {
   productName: string;
   variantSku: string;
   variantDisplay: string;
-  colorName: string | null;
+  brandName: string | null;
+  flavourName: string | null;
   qty: number;
   unitCost: number;
   gstEnabled: boolean;
@@ -75,12 +90,12 @@ function fmtInr(n: number) {
 }
 
 function defaultRates(kind: string) {
-  if (kind === "APPAREL") return { cgst: 2.5, sgst: 2.5, igst: 0 };
+  if (kind === "SUPPLEMENT") return { cgst: 2.5, sgst: 2.5, igst: 0 };
   return { cgst: 9, sgst: 9, igst: 0 };
 }
 
 function variantDisplay(v: VariantRow): string {
-  return [v.color?.name, v.size?.label].filter(Boolean).join(" · ") || "Default";
+  return [v.flavour?.name, v.packSize?.label].filter(Boolean).join(" · ") || "Default";
 }
 
 function lineMoney(l: CartLine): {
@@ -256,7 +271,8 @@ export function PurchasesPage() {
       productName: selectedProduct.name,
       variantSku: selectedVariant.sku,
       variantDisplay: variantDisplay(selectedVariant),
-      colorName: selectedVariant.color?.name ?? null,
+      brandName: selectedVariant.brand?.name ?? null,
+      flavourName: selectedVariant.flavour?.name ?? null,
       qty,
       unitCost: unit,
       gstEnabled: draftGstEnabled,
@@ -387,7 +403,7 @@ export function PurchasesPage() {
                 <Input
                   ref={searchRef}
                   id="purchase-search"
-                  placeholder="Search name, brand, or category…"
+                  placeholder="Search name, brand, flavour or pack size…"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   autoComplete="off"
@@ -449,7 +465,10 @@ export function PurchasesPage() {
                           >
                             <span className="font-medium">{p.name}</span>
                             <span className="text-xs text-muted-foreground">
-                              {p.category.name} · {p.kind === "APPAREL" ? "Clothing" : "Accessory"}
+                              {searchProductBrands(p).length > 0
+                                ? `${searchProductBrands(p).join(", ")} · `
+                                : ""}
+                              {p.kind === "SUPPLEMENT" ? "Supplement" : "Accessory"}
                             </span>
                           </button>
                         </li>
@@ -487,7 +506,8 @@ export function PurchasesPage() {
                                 : "border-border/80 bg-muted/40 hover:bg-muted",
                             )}
                           >
-                            <ColorLabel colorName={v.color?.name}>{variantDisplay(v)}</ColorLabel>
+                            <BrandTag brand={v.brand?.name} className="mr-1.5 align-middle" />
+                            <FlavourLabel flavour={v.flavour?.name}>{variantDisplay(v)}</FlavourLabel>
                             <span className="ml-1.5 font-mono opacity-80">{v.sku}</span>
                           </button>
                         ))}
@@ -526,7 +546,12 @@ export function PurchasesPage() {
                           </div>
                         </div>
                         <div className="space-y-1.5">
-                          <Label className="text-xs">Purchase rate (unit)</Label>
+                          <Label className="text-xs">
+                            Purchase rate (unit)
+                            <span className="ml-1 font-normal text-muted-foreground">
+                              — this is the new cost price
+                            </span>
+                          </Label>
                           <Input
                             type="number"
                             min={0}
@@ -536,6 +561,27 @@ export function PurchasesPage() {
                             onChange={(e) => setDraftCost(e.target.value)}
                             className="h-9 rounded-lg text-sm tabular-nums"
                           />
+                          {/* What this variant cost before, so a supplier re-rate is
+                              obvious at the moment the new rate is typed. */}
+                          {selectedVariant ? (
+                            <p className="text-[11px] leading-snug text-muted-foreground">
+                              {selectedVariant.lastCost
+                                ? `Last bought at ${fmtInr(Number(selectedVariant.lastCost))}`
+                                : "Never purchased yet"}
+                              {selectedVariant.avgCost && Number(selectedVariant.avgCost) > 0
+                                ? ` · avg cost ${fmtInr(Number(selectedVariant.avgCost))}`
+                                : ""}
+                              {(() => {
+                                const typed = Number(draftCost);
+                                const last = Number(selectedVariant.lastCost ?? 0);
+                                if (!typed || !last) return "";
+                                const diff = typed - last;
+                                if (Math.abs(diff) < 0.01) return " · same as last time";
+                                const pct = (diff / last) * 100;
+                                return ` · ${diff > 0 ? "up" : "down"} ${fmtInr(Math.abs(diff))} (${Math.abs(pct).toFixed(0)}%)`;
+                              })()}
+                            </p>
+                          ) : null}
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center gap-4 text-sm">
@@ -564,7 +610,7 @@ export function PurchasesPage() {
                   )
                 ) : (
                   <p className="text-sm text-muted-foreground">
-                    Choose a product from the list to select colour / size and rate.
+                    Choose a product from the list to select flavour / pack size and rate.
                   </p>
                 )}
               </CardContent>
@@ -630,7 +676,8 @@ export function PurchasesPage() {
                               <div className="text-[11px] text-muted-foreground">{l.variantSku}</div>
                             </TableCell>
                             <TableCell className="max-w-[120px] text-xs text-muted-foreground">
-                              <ColorLabel colorName={l.colorName}>{l.variantDisplay}</ColorLabel>
+                              <BrandTag brand={l.brandName} className="mr-1.5 align-middle" />
+                              <FlavourLabel flavour={l.flavourName}>{l.variantDisplay}</FlavourLabel>
                             </TableCell>
                             <TableCell className="text-right">
                               <div className="inline-flex items-center gap-0.5 rounded-md border border-border/70 p-0.5">

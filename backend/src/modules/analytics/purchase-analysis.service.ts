@@ -15,8 +15,8 @@ export type PurchaseAnalysisRow = {
   brand: string | null;
   productName: string;
   productKind: string;
-  colorName: string | null;
-  sizeLabel: string | null;
+  flavourName: string | null;
+  packSizeLabel: string | null;
   variantLabel: string;
   currentStock: number;
   threshold: number;
@@ -162,8 +162,8 @@ export async function getPurchaseAnalysis(input: PurchaseAnalysisQuery) {
       brand: string | null;
       product_name: string;
       product_kind: string;
-      color_name: string | null;
-      size_label: string | null;
+      flavour_name: string | null;
+      pack_size_label: string | null;
       current_stock: number;
       low_stock_threshold: number | null;
       units_sold: string | null;
@@ -184,18 +184,19 @@ export async function getPurchaseAnalysis(input: PurchaseAnalysisQuery) {
     SELECT
       pv.id AS variant_id,
       pv.sku,
-      p.brand,
+      b.name AS brand,
       p.name AS product_name,
       p.kind::text AS product_kind,
-      c.name AS color_name,
-      s.label AS size_label,
+      fl.name AS flavour_name,
+      pk.label AS pack_size_label,
       COALESCE(ib.quantity, 0) AS current_stock,
       pv.low_stock_threshold,
       COALESCE(ps.units_sold, 0)::text AS units_sold
     FROM product_variants pv
     INNER JOIN products p ON p.id = pv.product_id
-    LEFT JOIN colors c ON c.id = pv.color_id
-    LEFT JOIN sizes s ON s.id = pv.size_id
+    LEFT JOIN brands b ON b.id = pv.brand_id
+    LEFT JOIN flavours fl ON fl.id = pv.flavour_id
+    LEFT JOIN pack_sizes pk ON pk.id = pv.pack_size_id
     LEFT JOIN inventory_balances ib ON ib.variant_id = pv.id
     LEFT JOIN period_sales ps ON ps.variant_id = pv.id
     WHERE pv.is_active = true
@@ -216,10 +217,10 @@ export async function getPurchaseAnalysis(input: PurchaseAnalysisQuery) {
       brand: r.brand,
       productName: r.product_name,
       productKind: r.product_kind,
-      colorName: r.color_name,
-      sizeLabel: r.size_label,
+      flavourName: r.flavour_name,
+      packSizeLabel: r.pack_size_label,
       variantLabel:
-        [r.color_name, r.size_label].filter(Boolean).join(" / ") || "Default",
+        [r.flavour_name, r.pack_size_label].filter(Boolean).join(" / ") || "Default",
       currentStock,
       threshold,
       unitsSold,

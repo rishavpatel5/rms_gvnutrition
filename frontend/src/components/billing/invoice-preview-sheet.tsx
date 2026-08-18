@@ -1,6 +1,6 @@
 import { useBillingQuote } from "@/hooks/use-billing-quote";
 import { useBillingStore } from "@/stores/billing-store";
-import { ColorLabel } from "@/components/catalog/color-dot";
+import { FlavourLabel } from "@/components/catalog/flavour-label";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -53,7 +53,7 @@ export function InvoicePreviewSheet() {
             <img
               src={STORE_LOGO_PATH}
               alt={STORE_LOGO_ALT}
-              className="h-12 max-w-40 object-contain object-left"
+              className="h-12 max-w-40 object-contain object-left dark:invert"
             />
             <SheetTitle>Invoice preview</SheetTitle>
           </div>
@@ -85,7 +85,7 @@ export function InvoicePreviewSheet() {
                         ) : null}
                       </div>
                       <div className="text-xs text-muted-foreground">
-                        <ColorLabel colorName={l.colorName}>{l.variantLabel}</ColorLabel>
+                        <FlavourLabel flavour={l.flavourName}>{l.variantLabel}</FlavourLabel>
                       </div>
                       {ql && num(ql.itemDiscountAmount) > 0 ? (
                         <div className="text-[10px] text-emerald-700 dark:text-emerald-400">

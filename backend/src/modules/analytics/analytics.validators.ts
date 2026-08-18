@@ -11,7 +11,6 @@ export const dateRangeQuerySchema = z.object({
   from: z.string().regex(dayRe, "from must be YYYY-MM-DD (IST day boundary)"),
   to: z.string().regex(dayRe, "to must be YYYY-MM-DD (inclusive IST day)"),
   customerId: optionalCuid,
-  categoryId: optionalCuid,
 });
 
 export type DateRangeQuery = z.infer<typeof dateRangeQuerySchema>;

@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronRight, FileText, Pencil, Trash2 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ColorLabel } from "@/components/catalog/color-dot";
+import { FlavourLabel } from "@/components/catalog/flavour-label";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -195,7 +195,7 @@ export function OrdersReportPanel({ from, to }: Props) {
               <Label htmlFor="ord-search">Search invoice / customer / SKU</Label>
               <Input
                 id="ord-search"
-                placeholder="INV-… name, phone or SKU"
+                placeholder="GVN-… name, phone or SKU"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="w-[220px]"
@@ -494,7 +494,7 @@ export function OrdersReportPanel({ from, to }: Props) {
             <DialogDescription>
               {correctTarget ? (
                 <>
-                  Fixes a wrongly-recorded colour / size on{" "}
+                  Fixes a wrongly-recorded flavour / pack size on{" "}
                   <span className="font-medium text-foreground">
                     {correctTarget.line.productName}
                   </span>{" "}
@@ -525,7 +525,7 @@ export function OrdersReportPanel({ from, to }: Props) {
               >
                 <option value="">Select a variant…</option>
                 {correctVariants.map((v) => {
-                  const label = [v.colorName, v.sizeLabel].filter(Boolean).join(" / ") || "Default";
+                  const label = [v.flavourName, v.packSizeLabel].filter(Boolean).join(" / ") || "Default";
                   return (
                     <option key={v.id} value={v.id} disabled={v.quantity <= 0}>
                       {label} · {v.sku} · stock {v.quantity}
@@ -611,14 +611,14 @@ function OrderLinesDetail({
                   ) : null}
                 </div>
                 <div className="text-xs text-muted-foreground">
-                  <ColorLabel colorName={ln.colorName}>{ln.variantLabel}</ColorLabel>
+                  <FlavourLabel flavour={ln.flavourName}>{ln.variantLabel}</FlavourLabel>
                   {ln.isGiveaway && ln.giveawayReason ? (
                     <span className="mt-0.5 block">{ln.giveawayReason}</span>
                   ) : null}
                 </div>
               </TableCell>
               <TableCell className="font-mono text-xs">
-                <ColorLabel colorName={ln.colorName}>{ln.sku}</ColorLabel>
+                <FlavourLabel flavour={ln.flavourName}>{ln.sku}</FlavourLabel>
               </TableCell>
               <TableCell className="text-right tabular-nums">{ln.quantity}</TableCell>
               <TableCell className="text-right tabular-nums">{fmtInr(ln.unitPrice)}</TableCell>
@@ -655,7 +655,7 @@ function OrderLinesDetail({
                     size="sm"
                     variant="ghost"
                     className="h-7 gap-1 px-2 text-xs text-muted-foreground"
-                    title="Correct variant (colour / size)"
+                    title="Correct variant (flavour / pack size)"
                     onClick={() => onCorrect(ln)}
                   >
                     <Pencil className="size-3.5" />

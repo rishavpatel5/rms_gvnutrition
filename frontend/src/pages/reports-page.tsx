@@ -11,7 +11,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { ColorLabel } from "@/components/catalog/color-dot";
+import { FlavourLabel } from "@/components/catalog/flavour-label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -487,7 +487,7 @@ function ProfitPanel({ from, to }: { from: string; to: string }) {
                   </TableCell>
                   <TableCell className="font-mono text-xs">{row.invoiceNumber ?? "—"}</TableCell>
                   <TableCell className="font-mono text-xs">
-                    <ColorLabel colorName={row.colorName}>{row.sku}</ColorLabel>
+                    <FlavourLabel flavour={row.flavourName}>{row.sku}</FlavourLabel>
                   </TableCell>
                   <TableCell className="max-w-[200px] truncate">{row.productName}</TableCell>
                   <TableCell className="text-xs">
@@ -574,7 +574,7 @@ function InventoryPanel() {
                 id="inv-q"
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
-                placeholder="e.g. AT-"
+                placeholder="e.g. GVN-"
                 className="w-[220px]"
               />
             </div>
@@ -608,7 +608,7 @@ function InventoryPanel() {
               {rows.map((r) => (
                 <TableRow key={r.variantId}>
                   <TableCell className="font-mono text-xs">
-                    <ColorLabel colorName={r.colorName}>{r.sku}</ColorLabel>
+                    <FlavourLabel flavour={r.flavourName}>{r.sku}</FlavourLabel>
                   </TableCell>
                   <TableCell className="max-w-[240px] truncate">{r.productName}</TableCell>
                   <TableCell className="text-right tabular-nums">{r.quantityOnHand}</TableCell>
@@ -732,7 +732,7 @@ function VelocityPanel({ from, to }: { from: string; to: string }) {
               {items.map((r) => (
                 <TableRow key={r.variantId}>
                   <TableCell className="font-mono text-xs">
-                    <ColorLabel colorName={r.colorName}>{r.sku}</ColorLabel>
+                    <FlavourLabel flavour={r.flavourName}>{r.sku}</FlavourLabel>
                   </TableCell>
                   <TableCell className="max-w-[220px] truncate">{r.productName}</TableCell>
                   <TableCell className="text-right tabular-nums">{r.unitsSold}</TableCell>
@@ -820,7 +820,7 @@ function DeadStockPanel() {
             {rows.map((r) => (
               <TableRow key={r.variantId}>
                 <TableCell className="font-mono text-xs">
-                  <ColorLabel colorName={r.colorName}>{r.sku}</ColorLabel>
+                  <FlavourLabel flavour={r.flavourName}>{r.sku}</FlavourLabel>
                 </TableCell>
                 <TableCell className="max-w-[200px] truncate">{r.productName}</TableCell>
                 <TableCell className="text-right tabular-nums">{r.quantityOnHand}</TableCell>

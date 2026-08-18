@@ -6,7 +6,7 @@
 # (prod Supabase project — never use the same URLs as local backend/.env dev DB).
 #
 # Run locally (needs env at runtime):
-#   docker run --env-file backend/.env -p 4000:4000 attirebygv-api:local
+#   docker run --env-file backend/.env -p 4100:4100 gvnutrition-api:local
 #
 # Dev → prod schema flow:
 #   1. Local: backend/.env = dev DB → change schema.prisma → npm run db:migrate → test
@@ -45,5 +45,5 @@ COPY --from=deps /app/backend/prisma ./backend/prisma
 WORKDIR /app/backend
 COPY backend/docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod +x ./docker-entrypoint.sh
-EXPOSE 4000
+EXPOSE 4100
 ENTRYPOINT ["./docker-entrypoint.sh"]

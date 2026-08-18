@@ -1,6 +1,6 @@
 import { AlertTriangle } from "lucide-react";
 import { Link } from "react-router-dom";
-import { ColorLabel } from "@/components/catalog/color-dot";
+import { FlavourLabel } from "@/components/catalog/flavour-label";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -35,7 +35,7 @@ export function InventoryAlerts({
             >
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium">
-                  <ColorLabel colorName={row.colorName}>{row.name}</ColorLabel>
+                  <FlavourLabel flavour={row.flavourName}>{row.name}</FlavourLabel>
                 </p>
                 <p className="text-xs text-muted-foreground">{row.sku}</p>
               </div>

@@ -136,8 +136,8 @@ export async function getPurchaseOrderById(id: string) {
           variant: {
             include: {
               product: { select: { id: true, name: true, slug: true, kind: true } },
-              color: true,
-              size: true,
+              flavour: true,
+              packSize: true,
             },
           },
         },
@@ -205,8 +205,8 @@ export async function updatePurchaseOrderHeader(
           variant: {
             include: {
               product: { select: { id: true, name: true, kind: true } },
-              color: true,
-              size: true,
+              flavour: true,
+              packSize: true,
             },
           },
         },
@@ -294,8 +294,8 @@ export async function replacePurchaseLines(
             variant: {
               include: {
                 product: { select: { id: true, name: true, kind: true } },
-                color: true,
-                size: true,
+                flavour: true,
+                packSize: true,
               },
             },
           },
@@ -336,8 +336,8 @@ export async function markPurchaseOrdered(
             variant: {
               include: {
                 product: { select: { id: true, name: true, kind: true } },
-                color: true,
-                size: true,
+                flavour: true,
+                packSize: true,
               },
             },
           },
@@ -410,6 +410,18 @@ export async function receivePurchase(
         where: { id: item.id },
         data: { quantityReceived: { increment: toReceive } },
       });
+
+      // Keep the catalog's cost price in step with what was actually just paid.
+      // Suppliers re-rate constantly, so a cost captured once at product creation
+      // goes stale immediately and misleads anyone reading the catalog.
+      //
+      // This is the LATEST paid rate (ex-GST), not the average. WAC — which drives
+      // margin, COGS and valuation — is still derived from the purchase lines and
+      // is untouched by this write.
+      await tx.productVariant.update({
+        where: { id: item.variantId },
+        data: { costPrice: item.unitCostExclusive },
+      });
     }
 
     const refreshed = await tx.purchaseOrder.findUniqueOrThrow({
@@ -449,8 +461,8 @@ export async function receivePurchase(
             variant: {
               include: {
                 product: { select: { id: true, name: true, kind: true } },
-                color: true,
-                size: true,
+                flavour: true,
+                packSize: true,
               },
             },
           },
@@ -507,7 +519,12 @@ export async function saveAndReceivePurchase(input: {
       },
     });
 
-    const items: { id: string; variantId: string; quantityOrdered: number }[] = [];
+    const items: {
+      id: string;
+      variantId: string;
+      quantityOrdered: number;
+      unitCostExclusive: Prisma.Decimal;
+    }[] = [];
 
     for (let i = 0; i < input.lines.length; i++) {
       const line = input.lines[i]!;
@@ -542,6 +559,7 @@ export async function saveAndReceivePurchase(input: {
         id: row.id,
         variantId: row.variantId,
         quantityOrdered: row.quantityOrdered,
+        unitCostExclusive: row.unitCostExclusive,
       });
     }
 
@@ -560,6 +578,14 @@ export async function saveAndReceivePurchase(input: {
         where: { id: it.id },
         data: { quantityReceived: it.quantityOrdered },
       });
+
+      // Same as the staged receive path: refresh the catalog cost price to the
+      // rate just paid (ex-GST), so it never drifts from reality. WAC is derived
+      // from the purchase lines and is unaffected by this write.
+      await tx.productVariant.update({
+        where: { id: it.variantId },
+        data: { costPrice: it.unitCostExclusive },
+      });
     }
 
     return tx.purchaseOrder.update({
@@ -575,8 +601,8 @@ export async function saveAndReceivePurchase(input: {
             variant: {
               include: {
                 product: { select: { id: true, name: true, kind: true } },
-                color: true,
-                size: true,
+                flavour: true,
+                packSize: true,
               },
             },
           },

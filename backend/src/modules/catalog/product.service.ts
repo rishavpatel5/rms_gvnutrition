@@ -1,4 +1,4 @@
-import type { ProductGender, ProductKind, Prisma } from "@prisma/client";
+import type { PackSizeMeasure, ProductKind, Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildMeta, parsePagination } from "../../lib/pagination.js";
@@ -6,12 +6,11 @@ import { isValidSlug, slugify } from "../../lib/slug.js";
 
 export async function listProducts(query: Record<string, unknown>) {
   const { page, limit, skip } = parsePagination(query);
-  const categoryId =
-    typeof query.categoryId === "string" && query.categoryId.length > 0
-      ? query.categoryId
-      : undefined;
   const kind = query.kind as ProductKind | undefined;
-  const gender = query.gender as ProductGender | undefined;
+  const brandId =
+    typeof query.brandId === "string" && query.brandId.length > 0
+      ? query.brandId
+      : undefined;
   const isActive =
     query.isActive === "false" ? false : query.isActive === "true" ? true : true;
   const search =
@@ -20,17 +19,23 @@ export async function listProducts(query: Record<string, unknown>) {
       : undefined;
 
   const where: Prisma.ProductWhereInput = {
-    ...(categoryId ? { categoryId } : {}),
     ...(kind ? { kind } : {}),
-    ...(gender ? { gender } : {}),
     isActive,
-    variants: { some: { isActive: true } },
+    // Brand lives on the variant now, so a brand filter narrows to products that
+    // HAVE such a variant. Must be merged into this single `variants` key — a
+    // second `variants` property would silently overwrite the first.
+    variants: { some: { isActive: true, ...(brandId ? { brandId } : {}) } },
     ...(search
       ? {
           OR: [
             { name: { contains: search, mode: "insensitive" } },
             { slug: { contains: search, mode: "insensitive" } },
-            { brand: { contains: search, mode: "insensitive" } },
+            { hsnCode: { contains: search, mode: "insensitive" } },
+            // Brand / flavour / pack size live on the VARIANT, so match through it.
+            { variants: { some: { sku: { contains: search, mode: "insensitive" } } } },
+            { variants: { some: { brand: { name: { contains: search, mode: "insensitive" } } } } },
+            { variants: { some: { flavour: { name: { contains: search, mode: "insensitive" } } } } },
+            { variants: { some: { packSize: { label: { contains: search, mode: "insensitive" } } } } },
           ],
         }
       : {}),
@@ -43,7 +48,11 @@ export async function listProducts(query: Record<string, unknown>) {
       take: limit,
       orderBy: [{ updatedAt: "desc" }],
       include: {
-        category: { select: { id: true, name: true, slug: true } },
+        // Brands present on this product's variants — a product can span companies.
+        variants: {
+          where: { isActive: true },
+          select: { brand: { select: { id: true, name: true, slug: true } } },
+        },
         _count: { select: { variants: { where: { isActive: true } } } },
       },
     }),
@@ -57,12 +66,12 @@ export async function getProductById(id: string) {
   const row = await prisma.product.findUnique({
     where: { id },
     include: {
-      category: true,
       variants: {
         orderBy: { sku: "asc" },
         include: {
-          color: true,
-          size: true,
+          brand: true,
+          flavour: true,
+          packSize: true,
           inventory: true,
         },
       },
@@ -77,20 +86,12 @@ export async function getProductById(id: string) {
 export async function createProduct(input: {
   name: string;
   slug?: string;
-  brand?: string | null;
   kind: ProductKind;
-  gender: ProductGender;
-  categoryId: string;
+  hsnCode?: string | null;
 }) {
   const slug = (input.slug?.trim() || slugify(input.name)).toLowerCase();
   if (!isValidSlug(slug)) {
     throw new AppError(400, "INVALID_SLUG", "Invalid slug format");
-  }
-  const cat = await prisma.category.findUnique({
-    where: { id: input.categoryId },
-  });
-  if (!cat) {
-    throw new AppError(404, "CATEGORY_NOT_FOUND", "Category not found");
   }
   // If an inactive (soft-deleted) product is squatting on this slug, free it first
   const squatter = await prisma.product.findUnique({ where: { slug }, select: { id: true, isActive: true } });
@@ -106,10 +107,8 @@ export async function createProduct(input: {
       data: {
         name: input.name.trim(),
         slug,
-        brand: input.brand?.trim() || null,
         kind: input.kind,
-        gender: input.gender,
-        categoryId: input.categoryId,
+        hsnCode: input.hsnCode?.trim() || null,
       },
     });
   } catch (e: unknown) {
@@ -129,43 +128,27 @@ export async function updateProduct(
   input: {
     name?: string;
     slug?: string;
-    brand?: string | null;
     kind?: ProductKind;
-    gender?: ProductGender;
-    categoryId?: string;
-    isActive?: boolean;
+    hsnCode?: string | null;
+      isActive?: boolean;
   },
 ) {
   if (input.slug !== undefined && !isValidSlug(input.slug)) {
     throw new AppError(400, "INVALID_SLUG", "Invalid slug format");
   }
-  if (input.categoryId) {
-    const cat = await prisma.category.findUnique({
-      where: { id: input.categoryId },
-    });
-    if (!cat) {
-      throw new AppError(404, "CATEGORY_NOT_FOUND", "Category not found");
-    }
-  }
   try {
-    return await prisma.product.update({
-      where: { id },
-      data: {
-        ...(input.name !== undefined ? { name: input.name.trim() } : {}),
-        ...(input.slug !== undefined
-          ? { slug: input.slug.trim().toLowerCase() }
-          : {}),
-        ...(input.brand !== undefined
-          ? { brand: input.brand?.trim() || null }
-          : {}),
-        ...(input.kind !== undefined ? { kind: input.kind } : {}),
-        ...(input.gender !== undefined ? { gender: input.gender } : {}),
-        ...(input.categoryId !== undefined
-          ? { categoryId: input.categoryId }
-          : {}),
-        ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
-      },
-    });
+    const data: Prisma.ProductUncheckedUpdateInput = {
+      ...(input.name !== undefined ? { name: input.name.trim() } : {}),
+      ...(input.slug !== undefined
+        ? { slug: input.slug.trim().toLowerCase() }
+        : {}),
+      ...(input.kind !== undefined ? { kind: input.kind } : {}),
+      ...(input.hsnCode !== undefined
+        ? { hsnCode: input.hsnCode?.trim() || null }
+        : {}),
+      ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
+    };
+    return await prisma.product.update({ where: { id }, data });
   } catch (e: unknown) {
     const code =
       typeof e === "object" && e !== null && "code" in e
@@ -218,7 +201,11 @@ export async function deleteProduct(id: string): Promise<void> {
   }
 }
 
-export async function listColors(query: Record<string, unknown>) {
+// ---------------------------------------------------------------------------
+// Flavours (was Colours) — first optional per-SKU attribute
+// ---------------------------------------------------------------------------
+
+export async function listFlavours(query: Record<string, unknown>) {
   const { page, limit, skip } = parsePagination(query);
   const isActive =
     query.isActive === "false" ? false : query.isActive === "true" ? true : undefined;
@@ -226,34 +213,53 @@ export async function listColors(query: Record<string, unknown>) {
     typeof query.search === "string" && query.search.trim().length > 0
       ? query.search.trim()
       : undefined;
-  const where: Prisma.ColorWhereInput = {
+  const where: Prisma.FlavourWhereInput = {
     ...(isActive === undefined ? {} : { isActive }),
     ...(search
       ? { name: { contains: search, mode: "insensitive" } }
       : {}),
   };
   const [items, total] = await Promise.all([
-    prisma.color.findMany({
+    prisma.flavour.findMany({
       where,
       skip,
       take: limit,
       orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
     }),
-    prisma.color.count({ where }),
+    prisma.flavour.count({ where }),
   ]);
   return { items, meta: buildMeta(page, limit, total) };
 }
 
-export async function listSizes(query: Record<string, unknown>) {
+export async function createFlavour(input: { name: string; sortOrder?: number }) {
+  return prisma.flavour.create({
+    data: {
+      name: input.name.trim(),
+      sortOrder: input.sortOrder ?? 0,
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Pack sizes (was Sizes) — second optional per-SKU attribute.
+// Ordered by measure then normalized magnitude so "500g" never sorts before "1kg".
+// ---------------------------------------------------------------------------
+
+export async function listPackSizes(query: Record<string, unknown>) {
   const { page, limit, skip } = parsePagination(query);
   const isActive =
     query.isActive === "false" ? false : query.isActive === "true" ? true : undefined;
+  const measure =
+    typeof query.measure === "string" && query.measure.length > 0
+      ? (query.measure as PackSizeMeasure)
+      : undefined;
   const search =
     typeof query.search === "string" && query.search.trim().length > 0
       ? query.search.trim()
       : undefined;
-  const where: Prisma.SizeWhereInput = {
+  const where: Prisma.PackSizeWhereInput = {
     ...(isActive === undefined ? {} : { isActive }),
+    ...(measure ? { measure } : {}),
     ...(search
       ? {
           OR: [
@@ -264,44 +270,106 @@ export async function listSizes(query: Record<string, unknown>) {
       : {}),
   };
   const [items, total] = await Promise.all([
-    prisma.size.findMany({
+    prisma.packSize.findMany({
       where,
       skip,
       take: limit,
-      orderBy: [{ sortOrder: "asc" }, { label: "asc" }],
+      orderBy: [
+        { measure: "asc" },
+        { normalizedValue: "asc" },
+        { sortOrder: "asc" },
+      ],
     }),
-    prisma.size.count({ where }),
+    prisma.packSize.count({ where }),
   ]);
   return { items, meta: buildMeta(page, limit, total) };
 }
 
-export async function createColor(input: {
-  name: string;
-  hexCode?: string | null;
-  sortOrder?: number;
-}) {
-  return prisma.color.create({
-    data: {
-      name: input.name.trim(),
-      hexCode: input.hexCode?.trim() || null,
-      sortOrder: input.sortOrder ?? 0,
-    },
-  });
-}
-
-export async function createSize(input: {
+export async function createPackSize(input: {
   label: string;
   code: string;
+  measure: PackSizeMeasure;
+  normalizedValue: number;
   sortOrder?: number;
 }) {
   const code = input.code.trim().toUpperCase();
-  return prisma.size.create({
-    data: {
-      label: input.label.trim(),
-      code,
-      sortOrder: input.sortOrder ?? 0,
-    },
-  });
+  try {
+    return await prisma.packSize.create({
+      data: {
+        label: input.label.trim(),
+        code,
+        measure: input.measure,
+        normalizedValue: input.normalizedValue,
+        sortOrder: input.sortOrder ?? 0,
+      },
+    });
+  } catch (e: unknown) {
+    const errCode =
+      typeof e === "object" && e !== null && "code" in e
+        ? String((e as { code?: string }).code)
+        : "";
+    if (errCode === "P2002") {
+      throw new AppError(409, "PACK_SIZE_IN_USE", "Pack size code or label already exists");
+    }
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Brands — a managed entity so brand-wise reporting cannot fragment
+// ---------------------------------------------------------------------------
+
+export async function listBrands(query: Record<string, unknown>) {
+  const { page, limit, skip } = parsePagination(query);
+  const isActive =
+    query.isActive === "false" ? false : query.isActive === "true" ? true : undefined;
+  const search =
+    typeof query.search === "string" && query.search.trim().length > 0
+      ? query.search.trim()
+      : undefined;
+  const where: Prisma.BrandWhereInput = {
+    ...(isActive === undefined ? {} : { isActive }),
+    ...(search ? { name: { contains: search, mode: "insensitive" } } : {}),
+  };
+  const [items, total] = await Promise.all([
+    prisma.brand.findMany({
+      where,
+      skip,
+      take: limit,
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+    }),
+    prisma.brand.count({ where }),
+  ]);
+  return { items, meta: buildMeta(page, limit, total) };
+}
+
+export async function createBrand(input: {
+  name: string;
+  slug?: string;
+  sortOrder?: number;
+}) {
+  const slug = (input.slug?.trim() || slugify(input.name)).toLowerCase();
+  if (!isValidSlug(slug)) {
+    throw new AppError(400, "INVALID_SLUG", "Invalid slug format");
+  }
+  try {
+    return await prisma.brand.create({
+      data: {
+        name: input.name.trim(),
+        slug,
+        sortOrder: input.sortOrder ?? 0,
+      },
+    });
+  } catch (e: unknown) {
+    const code =
+      typeof e === "object" && e !== null && "code" in e
+        ? String((e as { code?: string }).code)
+        : "";
+    if (code === "P2002") {
+      throw new AppError(409, "BRAND_IN_USE", "Brand name or slug already exists");
+    }
+    throw e;
+  }
 }
 
 export { slugify };

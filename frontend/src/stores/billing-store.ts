@@ -20,7 +20,10 @@ export type BillingLine = {
   variantId: string;
   name: string;
   variantLabel: string;
-  colorName: string | null;
+  brandName: string | null;
+  /** WAC (or catalog cost) per unit — shown so the owner can see the margin. */
+  unitCost: number;
+  flavourName: string | null;
   sku: string;
   qty: number;
   unitPrice: number;
@@ -237,7 +240,9 @@ export const useBillingStore = create<BillingState>((set, get) => ({
           variantId: payload.variantId,
           name: payload.name,
           variantLabel: payload.variantLabel,
-          colorName: payload.colorName ?? null,
+          brandName: payload.brandName ?? null,
+          unitCost: payload.unitCost ?? 0,
+          flavourName: payload.flavourName ?? null,
           sku: payload.sku,
           qty: Math.min(payload.availableStock, addQty),
           unitPrice: payload.unitPrice,

@@ -83,7 +83,7 @@ export async function getExpenseSummary(query: Record<string, unknown>) {
   };
 
   // Total expenses & by category
-  const [expenseAgg, byCategoryRaw, revenue, monthly, giveawayRow] = await Promise.all([
+  const [expenseAgg, byCategoryRaw, revenue, monthly, giveawayRow, writeOffRows] = await Promise.all([
     prisma.expense.aggregate({
       _sum: { amount: true },
       where: { date: dateFilter },
@@ -162,13 +162,79 @@ export async function getExpenseSummary(query: Record<string, unknown>) {
         ${dateFrom ? Prisma.sql`AND o.confirmed_at >= ${new Date(dateFrom)}` : Prisma.sql``}
         ${dateTo ? Prisma.sql`AND o.confirmed_at <= ${new Date(`${dateTo}T23:59:59.999Z`)}` : Prisma.sql``}
     `),
+
+    // Stock written off via manual adjustments, split BY REASON so expiry loss is
+    // visible on its own. Valued at the SAME WAC basis as giveaways and inventory
+    // valuation. `cost_incl_gst` is informational only: the GST was paid to the
+    // supplier and cannot be recovered on goods that are thrown away.
+    prisma.$queryRaw<
+      { reason: string; units: string; cost: string; cost_incl_gst: string }[]
+    >(Prisma.sql`
+      WITH wac AS (
+        SELECT
+          variant_id,
+          CASE
+            WHEN SUM(quantity_received::numeric) > 0
+            THEN SUM(quantity_received::numeric * unit_cost_exclusive::numeric)
+                 / NULLIF(SUM(quantity_received::numeric), 0)
+            ELSE NULL
+          END AS unit_cost_wac
+        FROM purchase_order_items
+        WHERE quantity_received > 0
+        GROUP BY variant_id
+      )
+      SELECT
+        sa.reason::text AS reason,
+        ABS(COALESCE(SUM(il.quantity_delta), 0))::text AS units,
+        COALESCE(SUM(
+          ABS(il.quantity_delta)::numeric
+          * COALESCE(w.unit_cost_wac, pv.cost_price, 0::numeric)
+        ), 0)::text AS cost,
+        COALESCE(SUM(
+          ABS(il.quantity_delta)::numeric
+          * COALESCE(w.unit_cost_wac, pv.cost_price, 0::numeric)
+          * (1 + (COALESCE(pv.cgst_rate,0) + COALESCE(pv.sgst_rate,0) + COALESCE(pv.igst_rate,0))::numeric / 100)
+        ), 0)::text AS cost_incl_gst
+      FROM inventory_logs il
+      INNER JOIN stock_adjustments sa ON sa.id = il.reference_id
+      INNER JOIN product_variants pv ON pv.id = il.variant_id
+      LEFT JOIN wac w ON w.variant_id = il.variant_id
+      WHERE il.reference_kind = 'STOCK_ADJUSTMENT'::"InventoryReferenceKind"
+        AND il.quantity_delta < 0
+        ${dateFrom ? Prisma.sql`AND il.created_at >= ${new Date(dateFrom)}` : Prisma.sql``}
+        ${dateTo ? Prisma.sql`AND il.created_at <= ${new Date(`${dateTo}T23:59:59.999Z`)}` : Prisma.sql``}
+      GROUP BY sa.reason
+    `),
   ]);
 
   const totalExpenses = Number(expenseAgg._sum.amount ?? 0);
   const grossRevenue = Number(revenue._sum.grandTotal ?? 0);
   const giveawayUnits = Number(giveawayRow[0]?.giveaway_units ?? 0);
   const promotionalCost = Number(giveawayRow[0]?.giveaway_cost ?? 0);
-  const netProfit = grossRevenue - totalExpenses - promotionalCost;
+
+  const findReason = (r: string) => writeOffRows.find((x) => x.reason === r);
+  const expiredRow = findReason("EXPIRED");
+  const expiredUnits = Number(expiredRow?.units ?? 0);
+  const expiredCost = Number(expiredRow?.cost ?? 0);
+  const expiredCostInclGst = Number(expiredRow?.cost_incl_gst ?? 0);
+
+  // Damage / shrinkage / correction-out — reported apart from expiry.
+  const otherWriteOffs = writeOffRows.filter((x) => x.reason !== "EXPIRED");
+  const otherWriteOffUnits = otherWriteOffs.reduce((s, x) => s + Number(x.units ?? 0), 0);
+  const otherWriteOffCost = otherWriteOffs.reduce((s, x) => s + Number(x.cost ?? 0), 0);
+
+  const writeOffCost = expiredCost + otherWriteOffCost;
+  const writeOffByReason = writeOffRows.map((r) => ({
+    reason: r.reason,
+    units: Number(r.units ?? 0),
+    cost: Number(r.cost ?? 0),
+    costInclGst: Number(r.cost_incl_gst ?? 0),
+  }));
+  // Written-off stock is a real loss, so it reduces profit the same way giveaway
+  // cost already does. NOTE: this figure does NOT touch cash-in-hand (that money
+  // left when the supplier was paid) or inventory valuation (which already fell
+  // when the quantity left the ledger).
+  const netProfit = grossRevenue - totalExpenses - promotionalCost - writeOffCost;
 
   const byCategory = byCategoryRaw.map((r) => ({
     category: r.category,
@@ -183,5 +249,12 @@ export async function getExpenseSummary(query: Record<string, unknown>) {
     monthly,
     giveawayUnits,
     promotionalCost,
+    expiredUnits,
+    expiredCost,
+    expiredCostInclGst,
+    otherWriteOffUnits,
+    otherWriteOffCost,
+    writeOffCost,
+    writeOffByReason,
   };
 }

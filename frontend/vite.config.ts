@@ -10,10 +10,12 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    // GV Nutrition uses 5273/4100 so it can run alongside Attire (5173/4000)
+    // on the same machine without a port clash.
+    port: 5273,
     proxy: {
       "/api": {
-        target: "http://localhost:4000",
+        target: "http://localhost:4100",
         changeOrigin: true,
       },
     },

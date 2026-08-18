@@ -5,21 +5,24 @@
 | Script | Description |
 |--------|-------------|
 | `npm install` | Install all workspace dependencies |
-| `npm run dev` | API (`:4000`) + Vite (`:5173`) via `concurrently` |
+| `npm run dev` | API (`:4100`) + Vite (`:5273`) via `concurrently` |
 | `npm run build` | Typecheck/build API then web |
 | `npm run db:generate` | `prisma generate` in `backend` |
 | `npm run db:migrate` | `prisma migrate dev` in `backend` |
-| `npm run docker:up` | Start project Postgres (`attirebygv-postgres`, port **5432**) |
-| `npm run docker:down` | Stop compose services (named volume `attirebygv_postgres_data` is kept) |
+| `npm run docker:up` | Start optional local Postgres (`gvnutrition-postgres`, host port **55432**) |
+| `npm run docker:down` | Stop compose services (named volume `gvnutrition_postgres_data` is kept) |
 | `npm run docker:logs` | Follow Postgres container logs |
 
 ## Local Postgres (Docker)
 
-1. From repository root: `npm run docker:up` (builds `docker/postgres/Dockerfile`, starts **`attirebygv-postgres`**).
-2. Set `backend/.env` → `DATABASE_URL` to match compose (defaults are in `backend/.env.example`: user `rms`, password `rms_local_dev`, database `rms_dev`, port `5432`).
-3. If port **5432** is already in use, change `docker-compose.yml` to e.g. `"55432:5432"` and use that port in `DATABASE_URL`.
+> **Not needed for GV Nutrition** — this project uses a Supabase dev database. These steps are
+> only for running Postgres locally instead.
 
-**API Docker image (optional):** from repo root, `docker build -f backend/Dockerfile -t attirebygv-api:local .`
+1. From repository root: `npm run docker:up` (builds `docker/postgres/Dockerfile`, starts **`gvnutrition-postgres`**).
+2. Set `backend/.env` → `DATABASE_URL` to match compose (user `rms`, password `rms_local_dev`, database `rms_dev`, host port `55432`).
+3. Host port **55432** is deliberate — it keeps this container clear of Attire's local Postgres on 5432.
+
+**API Docker image (optional):** from repo root, `docker build -f backend/Dockerfile -t gvnutrition-api:local .`
 
 ## First run
 

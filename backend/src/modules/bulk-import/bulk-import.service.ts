@@ -1,52 +1,31 @@
-import { GstPricingMode, Prisma, ProductGender, ProductKind } from "@prisma/client";
+import { GstPricingMode, Prisma, ProductKind } from "@prisma/client";
 import { read as xlsxRead, utils as xlsxUtils } from "xlsx";
 import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { computeLine, computeOrderTotals } from "../../lib/gst-calculator.js";
 import { resolveVariantMasterUpdate } from "../../lib/bulk-import-variant-update.js";
+import { parsePackSizeLabel } from "../../lib/pack-size.js";
 
+// Nutrition column layout. `gender` is gone, colour/size became flavour/pack_size,
+// and hsn_code is appended as an optional trailing column.
 const EXPECTED_HEADERS = [
-  "sr_no", "product_name", "sku", "shelf_category", "kind", "gender",
-  "brand", "color", "size", "quantity", "cost_price", "list_price",
+  "sr_no", "product_name", "sku", "kind",
+  "brand", "flavour", "pack_size", "quantity", "cost_price", "list_price",
   "cgst_pct", "sgst_pct", "igst_pct", "low_stock_threshold",
-  "supplier_name", "gst_inclusive",
+  "supplier_name", "gst_inclusive", "hsn_code",
 ] as const;
 
 // Map friendly spreadsheet values → the actual Prisma enum values, so a sheet
-// that says MALE/FEMALE/CLOTHING still imports instead of crashing at commit
+// that says SUPPLEMENTS/PROTEIN still imports instead of crashing at commit
 // with an invalid-enum error. Anything unmapped becomes a clean scan error.
 const KIND_MAP: Record<string, ProductKind> = {
-  APPAREL: ProductKind.APPAREL,
-  APPARELS: ProductKind.APPAREL,
-  CLOTHING: ProductKind.APPAREL,
-  CLOTHES: ProductKind.APPAREL,
+  SUPPLEMENT: ProductKind.SUPPLEMENT,
+  SUPPLEMENTS: ProductKind.SUPPLEMENT,
+  SUPP: ProductKind.SUPPLEMENT,
+  NUTRITION: ProductKind.SUPPLEMENT,
   ACCESSORY: ProductKind.ACCESSORY,
   ACCESSORIES: ProductKind.ACCESSORY,
   ACC: ProductKind.ACCESSORY,
-};
-const GENDER_MAP: Record<string, ProductGender> = {
-  MENS: ProductGender.MENS,
-  MEN: ProductGender.MENS,
-  MALE: ProductGender.MENS,
-  MAN: ProductGender.MENS,
-  "MEN'S": ProductGender.MENS,
-  WOMENS: ProductGender.WOMENS,
-  WOMEN: ProductGender.WOMENS,
-  FEMALE: ProductGender.WOMENS,
-  WOMAN: ProductGender.WOMENS,
-  LADIES: ProductGender.WOMENS,
-  "WOMEN'S": ProductGender.WOMENS,
-  UNISEX: ProductGender.UNISEX,
-  UNI: ProductGender.UNISEX,
-  KIDS: ProductGender.KIDS,
-  KID: ProductGender.KIDS,
-  CHILDREN: ProductGender.KIDS,
-  BOYS: ProductGender.KIDS,
-  GIRLS: ProductGender.KIDS,
-  NOT_APPLICABLE: ProductGender.NOT_APPLICABLE,
-  NA: ProductGender.NOT_APPLICABLE,
-  "N/A": ProductGender.NOT_APPLICABLE,
-  NONE: ProductGender.NOT_APPLICABLE,
 };
 
 // ── Jaro-Winkler fuzzy similarity ──────────────────────────────────────────
@@ -93,12 +72,10 @@ export type RawRow = {
   sr_no: number;
   product_name: string;
   sku: string;
-  shelf_category: string;
   kind: string;
-  gender: string;
   brand: string;
-  color: string;
-  size: string;
+  flavour: string;
+  pack_size: string;
   quantity: number;
   cost_price: number;
   list_price: number;
@@ -108,6 +85,7 @@ export type RawRow = {
   low_stock_threshold: number | null;
   supplier_name: string;
   gst_inclusive: boolean;
+  hsn_code: string;
 };
 
 export type ScanRowResult = {
@@ -121,12 +99,12 @@ export type ScanRowResult = {
   productId?: string;
   productMatch?: { id: string; name: string; similarity: number };
   supplierId?: string;
-  categoryId?: string;
-  categoryIsNew?: boolean;
-  colorId?: string;
-  colorIsNew?: boolean;
-  sizeId?: string;
-  sizeIsNew?: boolean;
+  brandId?: string;
+  brandIsNew?: boolean;
+  flavourId?: string;
+  flavourIsNew?: boolean;
+  packSizeId?: string;
+  packSizeIsNew?: boolean;
 };
 
 export type ScanResult = {
@@ -144,12 +122,12 @@ export type CommitRow = {
   productId?: string;
   raw: RawRow;
   supplierId: string;
-  categoryId?: string;
-  categoryIsNew?: boolean;
-  colorId?: string;
-  colorIsNew?: boolean;
-  sizeId?: string;
-  sizeIsNew?: boolean;
+  brandId?: string;
+  brandIsNew?: boolean;
+  flavourId?: string;
+  flavourIsNew?: boolean;
+  packSizeId?: string;
+  packSizeIsNew?: boolean;
 };
 
 export type CommitRequest = { rows: CommitRow[] };
@@ -159,9 +137,9 @@ export type CommitResult = {
   batchId: string;
   purchaseOrderIds: string[];
   rowsImported: number;
-  newCategoriesCreated: number;
-  newColorsCreated: number;
-  newSizesCreated: number;
+  newFlavoursCreated: number;
+  newPackSizesCreated: number;
+  newBrandsCreated: number;
   newProductsCreated: number;
   newVariantsCreated: number;
 };
@@ -170,9 +148,9 @@ export type CommitResult = {
 export type CatalogResult = {
   batchId: string;
   rowsImported: number;
-  newCategoriesCreated: number;
-  newColorsCreated: number;
-  newSizesCreated: number;
+  newFlavoursCreated: number;
+  newPackSizesCreated: number;
+  newBrandsCreated: number;
   newProductsCreated: number;
   newVariantsCreated: number;
   variantsUpdated: number;
@@ -210,10 +188,44 @@ async function uniqueSlug(base: string): Promise<string> {
   return slug;
 }
 
-async function uniqueCategorySlug(base: string): Promise<string> {
-  let slug = base, i = 1;
-  while (await prisma.category.findUnique({ where: { slug } })) slug = `${slug}-${i++}`;
-  return slug;
+/** One SKU segment: uppercase, hyphenated, length-capped. */
+function skuToken(value: string, max: number): string {
+  return value
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, max)
+    .replace(/-+$/, "");
+}
+
+/**
+ * Generate BRAND-PRODUCT-FLAVOUR-PACKSIZE for an import row whose SKU cell is blank.
+ * Mirrors generateUniqueSku() in catalog/variant.service.ts — keep the two in sync.
+ */
+async function generateImportSku(
+  brand: string,
+  productName: string,
+  flavour: string,
+  packSize: string,
+): Promise<string> {
+  const parts = [
+    brand ? skuToken(brand, 18) : "",
+    skuToken(productName, 22),
+    flavour ? skuToken(flavour, 12) : "",
+    packSize ? skuToken(packSize, 10) : "",
+  ].filter(Boolean);
+  const base = parts.join("-").slice(0, 58).replace(/-+$/, "") || "SKU";
+
+  let candidate = base;
+  for (let n = 2; n < 1000; n++) {
+    const clash = await prisma.productVariant.findUnique({
+      where: { sku: candidate },
+      select: { id: true },
+    });
+    if (!clash) return candidate;
+    candidate = `${base}-${n}`;
+  }
+  throw new AppError(409, "SKU_GENERATION_FAILED", "Could not generate a unique SKU");
 }
 
 // ── Scan ────────────────────────────────────────────────────────────────────
@@ -246,21 +258,55 @@ export async function scanImportFile(buffer: Buffer): Promise<ScanResult> {
   if (dataRows.length > 500) throw new AppError(400, "TOO_MANY_ROWS", "Maximum 500 rows per import");
 
   // Pre-load all DB entities for matching
-  const [allProducts, allSuppliers, allCategories, allColors, allSizes, allVariants] =
+  const [allProducts, allSuppliers, allFlavours, allPackSizes, allBrands, allVariants] =
     await Promise.all([
       prisma.product.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
       prisma.supplier.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
-      prisma.category.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
-      prisma.color.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
-      prisma.size.findMany({ where: { isActive: true }, select: { id: true, label: true, code: true } }),
-      prisma.productVariant.findMany({ where: { isActive: true }, select: { id: true, sku: true } }),
+      prisma.flavour.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
+      prisma.packSize.findMany({ where: { isActive: true }, select: { id: true, label: true, code: true } }),
+      prisma.brand.findMany({ where: { isActive: true }, select: { id: true, name: true } }),
+      prisma.productVariant.findMany({
+        where: { isActive: true },
+        select: {
+          id: true,
+          sku: true,
+          product: { select: { name: true } },
+          brand: { select: { name: true } },
+          flavour: { select: { name: true } },
+          packSize: { select: { label: true } },
+        },
+      }),
     ]);
 
   const skuMap = new Map<string, string>(); // lowercase sku → variantId
   for (const v of allVariants) skuMap.set(v.sku.toLowerCase(), v.id);
 
+  /**
+   * Identity of a variant when the sheet leaves the SKU blank: product + company +
+   * flavour + pack size. Brand is part of the key because the same flavour and pack
+   * size from two companies are two different sellable items.
+   */
+  const identityKey = (
+    productName: string,
+    brand: string,
+    flavour: string,
+    packSize: string,
+  ): string =>
+    [productName, brand, flavour, packSize]
+      .map((s) => s.trim().toLowerCase())
+      .join("||");
+
+  const identityMap = new Map<string, string>(); // identity → variantId
+  for (const v of allVariants) {
+    identityMap.set(
+      identityKey(v.product.name, v.brand?.name ?? "", v.flavour?.name ?? "", v.packSize?.label ?? ""),
+      v.id,
+    );
+  }
+
   const results: ScanRowResult[] = [];
   const seenSkus = new Set<string>(); // catch duplicates within the file
+  const seenIdentities = new Set<string>(); // same, for rows with a blank SKU
 
   const numCell = (v: unknown, fallback = 0) =>
     v !== null && v !== undefined && v !== "" ? Number(v) : fallback;
@@ -275,51 +321,68 @@ export async function scanImportFile(buffer: Buffer): Promise<ScanResult> {
     const sr_no = numCell(row[0]) || i + 1;
     const product_name = strCell(row[1]);
     const sku = strCell(row[2]);
-    const shelf_category = strCell(row[3]);
-    const kindRaw = strCell(row[4]).toUpperCase();
-    const genderRaw = strCell(row[5]).toUpperCase();
+    const kindRaw = strCell(row[3]).toUpperCase();
     const kind = KIND_MAP[kindRaw] ?? ""; // mapped enum value, or "" when invalid
-    const gender = GENDER_MAP[genderRaw] ?? "";
-    const brand = strCell(row[6]);
-    const color = strCell(row[7]);
-    const size = strCell(row[8]);
-    const quantity = numCell(row[9]);
-    const cost_price = numCell(row[10]);
-    const list_price = numCell(row[11]);
-    const cgst_pct = numCell(row[12]);
-    const sgst_pct = numCell(row[13]);
-    const igst_pct = numCell(row[14]);
+    const brand = strCell(row[4]);
+    const flavour = strCell(row[5]);
+    const pack_size = strCell(row[6]);
+    const quantity = numCell(row[7]);
+    const cost_price = numCell(row[8]);
+    const list_price = numCell(row[9]);
+    const cgst_pct = numCell(row[10]);
+    const sgst_pct = numCell(row[11]);
+    const igst_pct = numCell(row[12]);
     const low_stock_threshold =
-      row[15] !== null && row[15] !== undefined && row[15] !== "" ? numCell(row[15]) : null;
-    const supplier_name = strCell(row[16]);
-    const gst_raw = strCell(row[17]).toUpperCase();
+      row[13] !== null && row[13] !== undefined && row[13] !== "" ? numCell(row[13]) : null;
+    const supplier_name = strCell(row[14]);
+    const gst_raw = strCell(row[15]).toUpperCase();
     const gst_inclusive = ["YES", "Y", "TRUE", "1"].includes(gst_raw);
+    const hsn_code = strCell(row[16]);
 
     const rawRow: RawRow = {
-      sr_no, product_name, sku, shelf_category, kind, gender, brand,
-      color, size, quantity, cost_price, list_price, cgst_pct, sgst_pct, igst_pct,
-      low_stock_threshold, supplier_name, gst_inclusive,
+      sr_no, product_name, sku, kind, brand,
+      flavour, pack_size, quantity, cost_price, list_price, cgst_pct, sgst_pct, igst_pct,
+      low_stock_threshold, supplier_name, gst_inclusive, hsn_code,
     };
 
-    // Required field validation
-    if (!sku) errors.push("SKU is required");
+    // Required field validation. SKU is deliberately NOT required — the owner never
+    // types SKUs, so a blank cell means "generate one". Identity for a blank-SKU row
+    // is product + brand + flavour + pack size.
     if (!product_name) errors.push("Product name is required");
-    if (!shelf_category) errors.push("Shelf category is required");
     if (!supplier_name) errors.push("Supplier name is required");
     if (!quantity || isNaN(quantity) || quantity <= 0) errors.push("Quantity must be > 0");
     else if (!Number.isInteger(quantity)) errors.push("Quantity must be a whole number");
     if (isNaN(cost_price) || cost_price < 0) errors.push("Cost price must be ≥ 0");
     if (isNaN(list_price) || list_price < 0) errors.push("List price must be ≥ 0");
 
-    if (!kind) errors.push(`Kind must be APPAREL or ACCESSORY (got "${kindRaw || "empty"}")`);
-    if (!gender)
-      errors.push(`Gender must be MENS, WOMENS, UNISEX or KIDS (got "${genderRaw || "empty"}")`);
+    if (!kind) errors.push(`Kind must be SUPPLEMENT or ACCESSORY (got "${kindRaw || "empty"}")`);
+
+    // Pack size is optional, but an unparseable one is a hard error — silently
+    // dropping it would create a variant with no size against the owner's intent.
+    if (pack_size && !parsePackSizeLabel(pack_size)) {
+      errors.push(
+        `Pack size "${pack_size}" not understood. Use a number with a unit, ` +
+          `e.g. 1kg, 500g, 500ml, 1L, or a plain count like 60 for tablets`,
+      );
+    }
 
     if (sku) {
       if (seenSkus.has(sku.toLowerCase())) {
         errors.push(`Duplicate SKU in this file: "${sku}"`);
       } else {
         seenSkus.add(sku.toLowerCase());
+      }
+    } else if (product_name) {
+      // Without a SKU the row is identified by product + brand + flavour + pack size,
+      // so the same combination twice in one sheet is a duplicate.
+      const key = identityKey(product_name, brand, flavour, pack_size);
+      if (seenIdentities.has(key)) {
+        errors.push(
+          `Duplicate row: "${product_name}" · ${brand || "no brand"} · ` +
+            `${flavour || "no flavour"} · ${pack_size || "no pack size"} appears more than once`,
+        );
+      } else {
+        seenIdentities.add(key);
       }
     }
 
@@ -341,46 +404,55 @@ export async function scanImportFile(buffer: Buffer): Promise<ScanResult> {
       continue;
     }
 
-    // Fuzzy match category (auto-create if not found)
-    let categoryId: string | undefined;
-    let categoryIsNew = false;
-    let bestCat = 0;
-    for (const c of allCategories) {
-      const sc = strSim(shelf_category, c.name);
-      if (sc > bestCat) { bestCat = sc; categoryId = c.id; }
-    }
-    if (bestCat < 0.85) {
-      categoryId = undefined;
-      categoryIsNew = true;
-      warnings.push(`Category "${shelf_category}" will be auto-created`);
+    // Brand match (auto-create if missing)
+    let brandId: string | undefined;
+    let brandIsNew = false;
+    if (brand) {
+      const bm = allBrands.find((b) => b.name.toLowerCase() === brand.toLowerCase());
+      if (bm) { brandId = bm.id; }
+      else { brandIsNew = true; warnings.push(`Brand "${brand}" will be auto-created`); }
     }
 
-    // Color match (auto-create if missing)
-    let colorId: string | undefined;
-    let colorIsNew = false;
-    if (color) {
-      const cm = allColors.find((c) => c.name.toLowerCase() === color.toLowerCase());
-      if (cm) { colorId = cm.id; }
-      else { colorIsNew = true; warnings.push(`Color "${color}" will be auto-created`); }
+    // Flavour match (auto-create if missing)
+    let flavourId: string | undefined;
+    let flavourIsNew = false;
+    if (flavour) {
+      const fm = allFlavours.find((f) => f.name.toLowerCase() === flavour.toLowerCase());
+      if (fm) { flavourId = fm.id; }
+      else { flavourIsNew = true; warnings.push(`Flavour "${flavour}" will be auto-created`); }
     }
 
-    // Size match (auto-create if missing)
-    let sizeId: string | undefined;
-    let sizeIsNew = false;
-    if (size) {
-      const sm = allSizes.find(
-        (s) => s.label.toLowerCase() === size.toLowerCase() || s.code.toLowerCase() === size.toLowerCase(),
-      );
-      if (sm) { sizeId = sm.id; }
-      else { sizeIsNew = true; warnings.push(`Size "${size}" will be auto-created`); }
+    // Pack size match (auto-create if missing). Already validated as parseable above.
+    let packSizeId: string | undefined;
+    let packSizeIsNew = false;
+    if (pack_size) {
+      // Match on the CANONICAL code, never the raw text: "500g", "500 g", "500G"
+      // and "500grams" are one pack size. Matching raw would miss the existing row
+      // and then fail on the unique code when trying to create a duplicate.
+      const parsedPack = parsePackSizeLabel(pack_size);
+      const pm = parsedPack
+        ? allPackSizes.find((p) => p.code.toUpperCase() === parsedPack.code)
+        : undefined;
+      if (pm) {
+        packSizeId = pm.id;
+      } else {
+        packSizeIsNew = true;
+        const shown = parsedPack ? parsedPack.label : pack_size;
+        warnings.push(`Pack size "${shown}" will be auto-created`);
+      }
     }
 
-    // SKU lookup
-    const existingVariantId = skuMap.get(sku.toLowerCase());
+    // Match an existing variant: by SKU when the sheet gives one, otherwise by
+    // product + brand + flavour + pack size. Either way a hit means "receive stock
+    // into this variant" rather than "create a duplicate".
+    const existingVariantId = sku
+      ? skuMap.get(sku.toLowerCase())
+      : identityMap.get(identityKey(product_name, brand, flavour, pack_size));
     if (existingVariantId) {
       results.push({
         rowNum, raw: rawRow, status: "green", action: "receive_only", errors, warnings,
-        variantId: existingVariantId, supplierId, categoryId, categoryIsNew, colorId, sizeId,
+        variantId: existingVariantId, supplierId,
+        brandId, brandIsNew, flavourId, flavourIsNew, packSizeId, packSizeIsNew,
       });
       continue;
     }
@@ -409,7 +481,8 @@ export async function scanImportFile(buffer: Buffer): Promise<ScanResult> {
 
     results.push({
       rowNum, raw: rawRow, status: "amber", action, errors, warnings,
-      productId, productMatch, supplierId, categoryId, categoryIsNew, colorId, colorIsNew, sizeId, sizeIsNew,
+      productId, productMatch, supplierId,
+      brandId, brandIsNew, flavourId, flavourIsNew, packSizeId, packSizeIsNew,
     });
   }
 
@@ -440,7 +513,7 @@ export async function commitCatalog(
   input: CommitRequest,
   createdById: string | null,
 ): Promise<CatalogResult> {
-  let newCategoriesCreated = 0, newColorsCreated = 0, newSizesCreated = 0;
+  let newFlavoursCreated = 0, newPackSizesCreated = 0, newBrandsCreated = 0;
   let newProductsCreated = 0, newVariantsCreated = 0, variantsUpdated = 0;
 
   // Create the batch up-front, marked AWAITING_STOCK until step 2 receives stock.
@@ -450,62 +523,87 @@ export async function commitCatalog(
 
   // ── Phase 1: Catalog — no wrapping transaction ──────────────────────────
 
-  // 1a. Colors
-  const colorMap = new Map<string, string>();
-  const pendingColors = new Map<string, string>();
+  // 1a. Flavours
+  const flavourMap = new Map<string, string>();
+  const pendingFlavours = new Map<string, string>();
   for (const row of input.rows) {
-    if (row.colorIsNew && row.raw.color && !row.colorId)
-      pendingColors.set(row.raw.color.toLowerCase(), row.raw.color);
+    if (row.flavourIsNew && row.raw.flavour && !row.flavourId)
+      pendingFlavours.set(row.raw.flavour.toLowerCase(), row.raw.flavour);
   }
-  for (const [key, name] of pendingColors) {
-    const ex = await prisma.color.findFirst({ where: { name: { equals: name, mode: "insensitive" } } });
-    colorMap.set(key, ex ? ex.id : (await prisma.color.create({ data: { name } })).id);
+  for (const [key, name] of pendingFlavours) {
+    const ex = await prisma.flavour.findFirst({ where: { name: { equals: name, mode: "insensitive" } } });
+    flavourMap.set(key, ex ? ex.id : (await prisma.flavour.create({ data: { name } })).id);
   }
-  newColorsCreated = colorMap.size;
+  newFlavoursCreated = flavourMap.size;
 
-  // 1b. Sizes
-  const sizeMap = new Map<string, string>();
-  const pendingSizes = new Map<string, string>();
+  // 1b. Pack sizes — the label is parsed into measure + normalized magnitude so
+  // auto-created rows sort correctly alongside hand-entered ones.
+  const packSizeMap = new Map<string, string>();
+  // Keyed by CANONICAL code so "500G" and "500 g" collapse to a single pending entry.
+  // Keying by raw text created two entries that both resolved to code "500G", and the
+  // second insert blew up on the unique constraint.
+  const pendingPackSizes = new Map<string, string>();
   for (const row of input.rows) {
-    if (row.sizeIsNew && row.raw.size && !row.sizeId)
-      pendingSizes.set(row.raw.size.toLowerCase(), row.raw.size);
+    if (row.packSizeIsNew && row.raw.pack_size && !row.packSizeId) {
+      const parsed = parsePackSizeLabel(row.raw.pack_size);
+      if (parsed) pendingPackSizes.set(parsed.code, row.raw.pack_size);
+    }
   }
-  for (const [key, label] of pendingSizes) {
-    const ex = await prisma.size.findFirst({ where: { label: { equals: label, mode: "insensitive" } } });
-    if (ex) { sizeMap.set(key, ex.id); continue; }
-    let code = label.toUpperCase().replace(/[^A-Z0-9]+/g, "_").slice(0, 20);
-    let n = 1;
-    while (await prisma.size.findUnique({ where: { code } })) code = `${code.slice(0, 17)}_${n++}`;
-    sizeMap.set(key, (await prisma.size.create({ data: { label, code } })).id);
-  }
-  newSizesCreated = sizeMap.size;
-
-  // 1c. Categories
-  const categoryMap = new Map<string, string>();
-  const pendingCategories = new Map<string, string>();
-  for (const row of input.rows) {
-    if (row.categoryIsNew && row.raw.shelf_category && !row.categoryId)
-      pendingCategories.set(row.raw.shelf_category.toLowerCase(), row.raw.shelf_category);
-  }
-  for (const [key, name] of pendingCategories) {
-    const ex = await prisma.category.findFirst({ where: { name: { equals: name, mode: "insensitive" } } });
-    if (ex) { categoryMap.set(key, ex.id); continue; }
-    const slug = await uniqueCategorySlug(
-      name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""),
+  for (const [canonicalCode, raw] of pendingPackSizes) {
+    const parsed = parsePackSizeLabel(raw);
+    if (!parsed) {
+      // Scan already rejects unparseable labels; guard anyway rather than guess a measure.
+      throw new AppError(400, "INVALID_PACK_SIZE", `Pack size "${raw}" could not be parsed`);
+    }
+    // Another import (or the catalog screen) may have created it in the meantime.
+    const ex = await prisma.packSize.findUnique({ where: { code: canonicalCode } });
+    if (ex) { packSizeMap.set(canonicalCode, ex.id); continue; }
+    packSizeMap.set(
+      canonicalCode,
+      (
+        await prisma.packSize.create({
+          data: {
+            label: parsed.label,
+            code: canonicalCode,
+            measure: parsed.measure,
+            normalizedValue: parsed.normalizedValue,
+          },
+        })
+      ).id,
     );
-    categoryMap.set(key, (await prisma.category.create({ data: { name, slug } })).id);
   }
-  newCategoriesCreated = categoryMap.size;
+  newPackSizesCreated = packSizeMap.size;
+
+  // 1b-ii. Brands
+  const brandMap = new Map<string, string>();
+  const pendingBrands = new Map<string, string>();
+  for (const row of input.rows) {
+    if (row.brandIsNew && row.raw.brand && !row.brandId)
+      pendingBrands.set(row.raw.brand.toLowerCase(), row.raw.brand);
+  }
+  for (const [key, name] of pendingBrands) {
+    const ex = await prisma.brand.findFirst({ where: { name: { equals: name, mode: "insensitive" } } });
+    if (ex) { brandMap.set(key, ex.id); continue; }
+    let slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "brand";
+    let n = 1;
+    while (await prisma.brand.findUnique({ where: { slug } })) slug = `${slug}-${n++}`;
+    brandMap.set(key, (await prisma.brand.create({ data: { name, slug } })).id);
+  }
+  newBrandsCreated = brandMap.size;
 
   // 1d. Products + variants
   const productMap = new Map<string, string>();
 
   for (const row of input.rows) {
     const r = row.raw;
-    const resolvedCategory =
-      row.categoryId ?? (r.shelf_category ? categoryMap.get(r.shelf_category.toLowerCase()) : undefined);
-    const resolvedColor = row.colorId ?? (r.color ? colorMap.get(r.color.toLowerCase()) : undefined);
-    const resolvedSize  = row.sizeId  ?? (r.size  ? sizeMap.get(r.size.toLowerCase())   : undefined);
+    const resolvedFlavour =
+      row.flavourId ?? (r.flavour ? flavourMap.get(r.flavour.toLowerCase()) : undefined);
+    // packSizeMap is keyed by canonical code, so resolve through the parser.
+    const resolvedPackSize =
+      row.packSizeId ??
+      (r.pack_size ? packSizeMap.get(parsePackSizeLabel(r.pack_size)?.code ?? "") : undefined);
+    const resolvedBrand =
+      row.brandId ?? (r.brand ? brandMap.get(r.brand.toLowerCase()) : undefined);
 
     if (row.action === "receive_only") {
       // Existing SKU → keep the SAME variant (no duplicate) and refresh only the Excel-controlled
@@ -532,11 +630,11 @@ export async function commitCatalog(
         const slug = await uniqueSlug(base);
         const p = await prisma.product.create({
           data: {
+            // Brand is NOT set here — it belongs to the variant, so one product
+            // can hold the same flavour/pack size from several companies.
             name: r.product_name, slug,
-            brand: r.brand || null,
             kind: r.kind as ProductKind,
-            gender: r.gender as ProductGender,
-            categoryId: resolvedCategory!,
+            hsnCode: r.hsn_code || null,
           },
         });
         productId = p.id;
@@ -547,10 +645,20 @@ export async function commitCatalog(
 
     if (!productId) throw new Error(`Row ${row.rowNum}: no product ID resolved`);
 
+    // A blank SKU column means "generate one" — same BRAND-PRODUCT-FLAVOUR-PACKSIZE
+    // rule the catalog screen uses, with a numeric suffix if that code is taken.
+    // Use the CANONICAL pack label, not the raw cell: "500 g" and "500G" must yield
+    // the same SKU, and "30 sachets" should read as 30-PCS rather than a truncated
+    // "30-SACHE" once the 8-char segment cap bites.
+    const canonicalPack = r.pack_size ? (parsePackSizeLabel(r.pack_size)?.label ?? r.pack_size) : "";
+    const variantSku = r.sku?.trim()
+      ? r.sku.trim()
+      : await generateImportSku(r.brand, r.product_name, r.flavour, canonicalPack);
+
     // Nested create: variant + inventoryBalance in one atomic implicit transaction
     await prisma.productVariant.create({
       data: {
-        productId, sku: r.sku,
+        productId, sku: variantSku,
         listPrice: new Prisma.Decimal(r.list_price),
         costPrice: r.cost_price > 0 ? new Prisma.Decimal(r.cost_price) : null,
         gstEnabled: true,
@@ -560,8 +668,9 @@ export async function commitCatalog(
         igstRate: new Prisma.Decimal(r.igst_pct),
         lowStockThreshold:
           r.low_stock_threshold != null ? Math.max(0, Math.floor(r.low_stock_threshold)) : null,
-        colorId: resolvedColor ?? null,
-        sizeId:  resolvedSize  ?? null,
+        brandId:    resolvedBrand    ?? null,
+        flavourId:  resolvedFlavour  ?? null,
+        packSizeId: resolvedPackSize ?? null,
         inventory: { create: { quantity: 0 } },
       },
     });
@@ -571,9 +680,9 @@ export async function commitCatalog(
   return {
     batchId: batch.id,
     rowsImported: input.rows.length,
-    newCategoriesCreated,
-    newColorsCreated,
-    newSizesCreated,
+    newFlavoursCreated,
+    newPackSizesCreated,
+    newBrandsCreated,
     newProductsCreated,
     newVariantsCreated,
     variantsUpdated,
@@ -615,18 +724,62 @@ export async function commitStock(
   // CASE-INSENSITIVE to match how the scan matches SKUs (skuMap keyed by lower(sku)) and how the
   // catalog step resolves existing variants — otherwise a stored SKU whose casing differs from the
   // sheet is matched by the scan (receive_only) but missed here, wrongly reporting "not in catalog".
-  const lowerSkus = [...new Set(input.rows.map((r) => r.raw.sku.toLowerCase()))];
-  const variants = await prisma.$queryRaw<{ id: string; sku: string }[]>(
-    Prisma.sql`SELECT id, sku FROM product_variants WHERE lower(sku) IN (${Prisma.join(lowerSkus)})`,
-  );
+  const lowerSkus = [...new Set(input.rows.map((r) => r.raw.sku.toLowerCase()).filter(Boolean))];
+  const variants = lowerSkus.length
+    ? await prisma.$queryRaw<{ id: string; sku: string }[]>(
+        Prisma.sql`SELECT id, sku FROM product_variants WHERE lower(sku) IN (${Prisma.join(lowerSkus)})`,
+      )
+    : [];
   const skuToId = new Map(variants.map((v) => [v.sku.toLowerCase(), v.id]));
+
+  // Identity fallback for blank-SKU rows. This is REQUIRED, not a nicety: rows for
+  // brand-new products carry no variantId at scan time (the variant did not exist
+  // yet) and no SKU, so after the catalog step created them there would otherwise
+  // be no way to find them and every row would report "not in catalog".
+  // Read fresh — the catalog step ran between the scan and now.
+  const freshVariants = await prisma.productVariant.findMany({
+    where: { isActive: true },
+    select: {
+      id: true,
+      product: { select: { name: true } },
+      brand: { select: { name: true } },
+      flavour: { select: { name: true } },
+      packSize: { select: { label: true } },
+    },
+  });
+  const identityToId = new Map<string, string>();
+  for (const v of freshVariants) {
+    identityToId.set(
+      [v.product.name, v.brand?.name ?? "", v.flavour?.name ?? "", v.packSize?.label ?? ""]
+        .map((x) => x.trim().toLowerCase())
+        .join("||"),
+      v.id,
+    );
+  }
+  /** Sheet text -> stored identity. Pack size must be canonicalised ("500 g" -> "500g"). */
+  const rowIdentity = (r: CommitRow["raw"]): string => {
+    const pack = r.pack_size ? (parsePackSizeLabel(r.pack_size)?.label ?? r.pack_size) : "";
+    return [r.product_name, r.brand, r.flavour, pack]
+      .map((x) => (x ?? "").trim().toLowerCase())
+      .join("||");
+  };
 
   const missing: string[] = [];
   const poLines: PoLine[] = [];
   for (const row of input.rows) {
-    const variantId = skuToId.get(row.raw.sku.toLowerCase());
+    // Resolution order: the id the scan already found, then the CASE-INSENSITIVE
+    // SKU map for sheets that supply codes, then identity for blank-SKU rows whose
+    // variant was only created moments ago by the catalog step.
+    const variantId =
+      row.variantId ??
+      (row.raw.sku.trim() ? skuToId.get(row.raw.sku.trim().toLowerCase()) : undefined) ??
+      identityToId.get(rowIdentity(row.raw));
     if (!variantId) {
-      missing.push(row.raw.sku);
+      missing.push(
+        row.raw.sku.trim() ||
+          `${row.raw.product_name} · ${row.raw.brand || "no brand"} · ` +
+            `${row.raw.flavour || "no flavour"} · ${row.raw.pack_size || "no pack size"}`,
+      );
       continue;
     }
     poLines.push({
@@ -804,9 +957,9 @@ export async function commitImport(
     batchId: cat.batchId,
     purchaseOrderIds: stock.purchaseOrderIds,
     rowsImported: cat.rowsImported,
-    newCategoriesCreated: cat.newCategoriesCreated,
-    newColorsCreated: cat.newColorsCreated,
-    newSizesCreated: cat.newSizesCreated,
+    newFlavoursCreated: cat.newFlavoursCreated,
+    newPackSizesCreated: cat.newPackSizesCreated,
+    newBrandsCreated: cat.newBrandsCreated,
     newProductsCreated: cat.newProductsCreated,
     newVariantsCreated: cat.newVariantsCreated,
   };

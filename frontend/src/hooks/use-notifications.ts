@@ -15,14 +15,14 @@ type BalanceRow = {
     id: string;
     sku: string;
     product: { name: string };
-    color: { name: string } | null;
-    size: { label: string } | null;
+    flavour: { name: string } | null;
+    packSize: { label: string } | null;
   };
 };
 
 function label(row: BalanceRow): string {
   const parts = [row.variant.product.name];
-  const attrs = [row.variant.color?.name, row.variant.size?.label].filter(Boolean);
+  const attrs = [row.variant.flavour?.name, row.variant.packSize?.label].filter(Boolean);
   if (attrs.length) parts.push(attrs.join(" / "));
   return parts.join(" — ");
 }

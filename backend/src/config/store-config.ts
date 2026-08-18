@@ -26,7 +26,7 @@ export function getStoreConfig(): StoreConfig {
   }
 
   return {
-    name: env("STORE_NAME", "Attire by GV"),
+    name: env("STORE_NAME", "GV Nutrition"),
     address: env("STORE_ADDRESS", ""),
     phone: env("STORE_PHONE", ""),
     email: env("STORE_EMAIL", ""),

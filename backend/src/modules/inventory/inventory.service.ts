@@ -296,9 +296,9 @@ export async function listBalances(query: Record<string, unknown>) {
       include: {
         variant: {
           include: {
-            product: { select: { id: true, name: true, slug: true, gender: true, kind: true } },
-            color: { select: { id: true, name: true } },
-            size: { select: { id: true, label: true, code: true } },
+            product: { select: { id: true, name: true, slug: true, kind: true } },
+            flavour: { select: { id: true, name: true } },
+            packSize: { select: { id: true, label: true, code: true } },
           },
         },
       },
@@ -319,7 +319,7 @@ export async function listStockSummary(query: Record<string, unknown>) {
       ? query.search.trim()
       : undefined;
   const productKind =
-    query.kind === "APPAREL" || query.kind === "ACCESSORY"
+    query.kind === "SUPPLEMENT" || query.kind === "ACCESSORY"
       ? String(query.kind)
       : undefined;
 
@@ -327,8 +327,8 @@ export async function listStockSummary(query: Record<string, unknown>) {
     ? Prisma.sql`AND (
         p.name ILIKE ${"%" + q + "%"}
         OR pv.sku ILIKE ${"%" + q + "%"}
-        OR COALESCE(c.name, '') ILIKE ${"%" + q + "%"}
-        OR COALESCE(s.label, '') ILIKE ${"%" + q + "%"}
+        OR COALESCE(fl.name, '') ILIKE ${"%" + q + "%"}
+        OR COALESCE(ps.label, '') ILIKE ${"%" + q + "%"}
       )`
     : Prisma.empty;
   const kindClause = productKind
@@ -339,8 +339,9 @@ export async function listStockSummary(query: Record<string, unknown>) {
     SELECT COUNT(*)::bigint AS c
     FROM product_variants pv
     INNER JOIN products p ON p.id = pv.product_id
-    LEFT JOIN colors c ON c.id = pv.color_id
-    LEFT JOIN sizes s ON s.id = pv.size_id
+    LEFT JOIN brands br ON br.id = pv.brand_id
+    LEFT JOIN flavours fl ON fl.id = pv.flavour_id
+    LEFT JOIN pack_sizes ps ON ps.id = pv.pack_size_id
     WHERE pv.is_active = true
       AND p.is_active = true
       ${searchClause}
@@ -353,8 +354,9 @@ export async function listStockSummary(query: Record<string, unknown>) {
       sku: string;
       product_name: string;
       product_kind: string;
-      color_name: string | null;
-      size_label: string | null;
+      brand_name: string | null;
+      flavour_name: string | null;
+      pack_size_label: string | null;
       low_stock_threshold: number | null;
       purchased_qty: string | null;
       sold_qty: string | null;
@@ -369,8 +371,9 @@ export async function listStockSummary(query: Record<string, unknown>) {
       pv.sku,
       p.name AS product_name,
       p.kind::text AS product_kind,
-      c.name AS color_name,
-      s.label AS size_label,
+      br.name AS brand_name,
+      fl.name AS flavour_name,
+      ps.label AS pack_size_label,
       pv.low_stock_threshold,
       COALESCE(SUM(CASE WHEN il.movement_type = 'PURCHASE_IN'::"InventoryMovementType" THEN il.quantity_delta ELSE 0 END), 0)::text AS purchased_qty,
       ABS(COALESCE(SUM(CASE WHEN il.movement_type = 'SALE_OUT'::"InventoryMovementType" THEN il.quantity_delta ELSE 0 END), 0))::text AS sold_qty,
@@ -380,14 +383,15 @@ export async function listStockSummary(query: Record<string, unknown>) {
       COALESCE(SUM(il.quantity_delta), 0)::text AS current_stock
     FROM product_variants pv
     INNER JOIN products p ON p.id = pv.product_id
-    LEFT JOIN colors c ON c.id = pv.color_id
-    LEFT JOIN sizes s ON s.id = pv.size_id
+    LEFT JOIN brands br ON br.id = pv.brand_id
+    LEFT JOIN flavours fl ON fl.id = pv.flavour_id
+    LEFT JOIN pack_sizes ps ON ps.id = pv.pack_size_id
     LEFT JOIN inventory_logs il ON il.variant_id = pv.id
     WHERE pv.is_active = true
       AND p.is_active = true
       ${searchClause}
       ${kindClause}
-    GROUP BY pv.id, pv.sku, p.name, p.kind, c.name, s.label, pv.low_stock_threshold
+    GROUP BY pv.id, pv.sku, p.name, p.kind, br.name, fl.name, ps.label, pv.low_stock_threshold
     ORDER BY p.name ASC, pv.sku ASC
     OFFSET ${skip} LIMIT ${limit}
   `);
@@ -400,9 +404,10 @@ export async function listStockSummary(query: Record<string, unknown>) {
       sku: r.sku,
       productName: r.product_name,
       productKind: r.product_kind,
-      colorName: r.color_name,
-      sizeLabel: r.size_label,
-      variantLabel: [r.color_name, r.size_label].filter(Boolean).join(" / ") || "Default",
+      brandName: r.brand_name,
+      flavourName: r.flavour_name,
+      packSizeLabel: r.pack_size_label,
+      variantLabel: [r.brand_name, r.flavour_name, r.pack_size_label].filter(Boolean).join(" / ") || "Default",
       purchasedQty: Number(r.purchased_qty ?? 0),
       soldQty: Number(r.sold_qty ?? 0),
       returnedQty: Number(r.returned_qty ?? 0),
@@ -427,8 +432,8 @@ export async function getBalanceByVariantId(variantId: string) {
     where: { id: variantId },
     include: {
       product: { select: { id: true, name: true, slug: true } },
-      color: true,
-      size: true,
+      flavour: true,
+      packSize: true,
       inventory: true,
     },
   });

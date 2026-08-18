@@ -16,12 +16,14 @@ import { MobileNavTrigger } from "@/components/layout/app-sidebar";
 import { clearStoredTokens } from "@/lib/api-client";
 
 /**
- * Optional cross-link to the other GV business (e.g. GV Nutrition). Hidden until set.
+ * Optional cross-link to the other GV business. This is the NUTRITION app, so it
+ * points AT Attire — the mirror of Attire's own button, which points here.
+ * Hidden until VITE_OTHER_APP_URL is set.
  * NOTE: VITE_OTHER_APP_URL is a build-time var — it only takes effect after a fresh build.
  */
 const OTHER_APP_URL = import.meta.env.VITE_OTHER_APP_URL as string | undefined;
 const OTHER_APP_NAME =
-  (import.meta.env.VITE_OTHER_APP_NAME as string | undefined) ?? "GV Nutrition";
+  (import.meta.env.VITE_OTHER_APP_NAME as string | undefined) ?? "Attire by GV";
 
 export function TopBar({ title }: { title: string }) {
   const navigate = useNavigate();

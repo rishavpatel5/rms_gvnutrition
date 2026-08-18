@@ -47,7 +47,7 @@ export function LoginPage() {
           <img
             src={STORE_LOGO_PATH}
             alt={STORE_LOGO_ALT}
-            className="mb-2 h-16 max-w-56 object-contain"
+            className="mb-2 h-16 max-w-56 object-contain dark:invert"
           />
           <CardTitle className="text-xl tracking-tight">Sign in</CardTitle>
         </CardHeader>

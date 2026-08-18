@@ -1,6 +1,7 @@
 import { CheckCircle2, Loader2, Search, XCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { ColorLabel } from "@/components/catalog/color-dot";
+import { BrandTag } from "@/components/catalog/brand-tag";
+import { FlavourLabel } from "@/components/catalog/flavour-label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -16,12 +17,12 @@ type SkuLookupVariant = {
   product: {
     id: string;
     name: string;
-    kind: "APPAREL" | "ACCESSORY";
-    brand: string | null;
-    category: { name: string };
+    kind: "SUPPLEMENT" | "ACCESSORY";
+    brand: { id: string; name: string } | null;
   };
-  color: { name: string } | null;
-  size: { label: string } | null;
+  brand: { id: string; name: string } | null;
+  flavour: { name: string } | null;
+  packSize: { label: string } | null;
   inventory: { quantity: number } | null;
 };
 
@@ -33,7 +34,7 @@ type SkuLookupResponse = {
 };
 
 function variantLabel(v: SkuLookupVariant): string {
-  return [v.color?.name, v.size?.label].filter(Boolean).join(" / ") || "—";
+  return [v.flavour?.name, v.packSize?.label].filter(Boolean).join(" / ") || "—";
 }
 
 function LookupResultRow({ row, onPick }: { row: SkuLookupVariant; onPick?: (row: SkuLookupVariant) => void }) {
@@ -52,12 +53,13 @@ function LookupResultRow({ row, onPick }: { row: SkuLookupVariant; onPick?: (row
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 space-y-1">
           <p className="font-medium leading-snug">{row.product.name}</p>
-          <p className="font-mono text-sm">
-            <ColorLabel colorName={row.color?.name}>{row.sku}</ColorLabel>
+          <p className="flex items-center gap-1.5 font-mono text-sm">
+            <BrandTag brand={row.brand?.name} />
+            <FlavourLabel flavour={row.flavour?.name}>{row.sku}</FlavourLabel>
           </p>
           <p className="text-xs text-muted-foreground">
-            {kindLabel(row.product.kind)} · {row.product.category.name}
-            {row.product.brand ? ` · ${row.product.brand}` : ""} · {variantLabel(row)}
+            {kindLabel(row.product.kind)}
+            {row.brand?.name ? ` · ${row.brand.name}` : ""} · {variantLabel(row)}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">

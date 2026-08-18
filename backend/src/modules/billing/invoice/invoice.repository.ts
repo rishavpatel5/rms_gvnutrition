@@ -13,10 +13,10 @@ export const ORDER_INVOICE_INCLUDE = {
       variant: {
         include: {
           product: {
-            select: { id: true, name: true, slug: true, kind: true },
+            select: { id: true, name: true, slug: true, kind: true, hsnCode: true },
           },
-          color: true,
-          size: true,
+          flavour: true,
+          packSize: true,
         },
       },
     },

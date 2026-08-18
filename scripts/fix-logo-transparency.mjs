@@ -1,5 +1,7 @@
 /**
- * One-off: convert logo (JPEG misnamed as .png) to PNG with transparent background.
+ * One-off helper: convert a logo to PNG with a transparent background.
+ * NOT needed for the current GV Nutrition logo — it is already RGBA with an
+ * 86% transparent background. Kept only in case a future logo arrives flattened.
  * Run from repo root: node scripts/fix-logo-transparency.mjs
  */
 import fs from "node:fs";
@@ -9,7 +11,7 @@ import sharp from "sharp";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targets = [
-  path.join(root, "frontend/public/brand/logo.png"),
+  path.join(root, "frontend/public/brand/gvlogo.png"),
   path.join(root, "backend/assets/logo.png"),
 ];
 

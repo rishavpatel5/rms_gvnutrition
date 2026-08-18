@@ -1,7 +1,9 @@
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, PackageMinus } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { ColorLabel } from "@/components/catalog/color-dot";
+import { BrandTag } from "@/components/catalog/brand-tag";
+import { FlavourLabel } from "@/components/catalog/flavour-label";
+import { StockAdjustmentSheet } from "@/components/inventory/stock-adjustment-sheet";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,16 +23,18 @@ import { fetchAllPaginated, fetchListMeta } from "@/lib/fetch-paginated";
 import { kindLabel, splitByProductKind } from "@/lib/product-kind";
 import { cn } from "@/lib/utils";
 
-type Color = { id: string; name: string };
-type Size = { id: string; label: string; code: string };
+type Brand = { id: string; name: string };
+type Flavour = { id: string; name: string };
+type PackSize = { id: string; label: string; code: string; measure: string };
 type BalanceRow = {
   quantity: number;
   variant: {
     id: string;
     sku: string;
-    product: { id: string; name: string; slug: string; kind: "APPAREL" | "ACCESSORY" };
-    color: Color | null;
-    size: Size | null;
+    product: { id: string; name: string; slug: string; kind: "SUPPLEMENT" | "ACCESSORY" };
+    brand: Brand | null;
+    flavour: Flavour | null;
+    packSize: PackSize | null;
   };
 };
 type LogRow = {
@@ -47,9 +51,10 @@ type StockSummaryRow = {
   variantId: string;
   sku: string;
   productName: string;
-  productKind: "APPAREL" | "ACCESSORY";
-  colorName?: string | null;
-  sizeLabel?: string | null;
+  productKind: "SUPPLEMENT" | "ACCESSORY";
+  brandName?: string | null;
+  flavourName?: string | null;
+  packSizeLabel?: string | null;
   variantLabel: string;
   purchasedQty: number;
   soldQty: number;
@@ -123,23 +128,44 @@ export function InventoryPage() {
 
 function InventoryWorkspace() {
   const [tab, setTab] = useState("overview");
+  const [adjustOpen, setAdjustOpen] = useState(false);
+  // Bumping this remounts the tab panels so freshly written-off stock disappears
+  // from the tables without a manual page refresh.
+  const [refreshKey, setRefreshKey] = useState(0);
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-lg font-semibold tracking-tight">Live stock</h2>
-        <p className="text-sm text-muted-foreground">
-          Live stock, movement history, and valuation. Stock increases only from{" "}
-          <Link to="/dashboard/purchases" className="underline underline-offset-2">
-            Purchases
-          </Link>
-          ; master data lives in{" "}
-          <Link to="/dashboard/catalog" className="underline underline-offset-2">
-            Master Catalog
-          </Link>
-          . Sales reduce stock automatically from Billing.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold tracking-tight">Live stock</h2>
+          <p className="text-sm text-muted-foreground">
+            Live stock, movement history, and valuation. Stock increases only from{" "}
+            <Link to="/dashboard/purchases" className="underline underline-offset-2">
+              Purchases
+            </Link>
+            ; master data lives in{" "}
+            <Link to="/dashboard/catalog" className="underline underline-offset-2">
+              Master Catalog
+            </Link>
+            . Sales reduce stock automatically from Billing.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          className="gap-1.5 rounded-full"
+          onClick={() => setAdjustOpen(true)}
+        >
+          <PackageMinus className="size-4" />
+          Adjust stock
+        </Button>
       </div>
+
+      <StockAdjustmentSheet
+        open={adjustOpen}
+        onOpenChange={setAdjustOpen}
+        onCompleted={() => setRefreshKey((k) => k + 1)}
+      />
 
       <Tabs value={tab} onValueChange={setTab} className="space-y-4">
         <TabsList className="flex h-auto flex-wrap gap-1 rounded-xl bg-muted/50 p-1">
@@ -158,16 +184,16 @@ function InventoryWorkspace() {
         </TabsList>
 
         <TabsContent value="overview" className="mt-0 space-y-4">
-          <OverviewTab />
+          <OverviewTab key={refreshKey} />
         </TabsContent>
         <TabsContent value="low" className="mt-0">
-          <LowStockTab />
+          <LowStockTab key={refreshKey} />
         </TabsContent>
         <TabsContent value="activity" className="mt-0">
-          <ActivityTab />
+          <ActivityTab key={refreshKey} />
         </TabsContent>
         <TabsContent value="valuation" className="mt-0">
-          <ValuationTab />
+          <ValuationTab key={refreshKey} />
         </TabsContent>
       </Tabs>
 
@@ -208,7 +234,10 @@ function StockLedgerTable({ rows, emptyHint }: { rows: StockSummaryRow[]; emptyH
                 <div className="text-xs text-muted-foreground">{r.sku}</div>
               </TableCell>
               <TableCell className="text-sm text-muted-foreground">
-                <ColorLabel colorName={r.colorName}>{r.variantLabel}</ColorLabel>
+                <span className="flex flex-wrap items-center gap-1.5">
+                  <BrandTag brand={r.brandName} />
+                  <FlavourLabel flavour={r.flavourName}>{r.variantLabel}</FlavourLabel>
+                </span>
               </TableCell>
               <TableCell className="text-right tabular-nums">{r.purchasedQty}</TableCell>
               <TableCell className="text-right tabular-nums">{r.soldQty}</TableCell>
@@ -272,7 +301,7 @@ function OverviewTab() {
     };
   }, []);
 
-  const { apparel, accessory } = splitByProductKind(rows);
+  const { supplement, accessory } = splitByProductKind(rows);
 
   return (
     <div className="grid gap-4 sm:grid-cols-2">
@@ -329,12 +358,12 @@ function OverviewTab() {
             <div className="space-y-8">
               <section className="space-y-3">
                 <div className="flex items-baseline justify-between gap-2 border-b border-border/60 pb-2">
-                  <h3 className="text-sm font-semibold">{kindLabel("APPAREL")}</h3>
+                  <h3 className="text-sm font-semibold">{kindLabel("SUPPLEMENT")}</h3>
                   <span className="text-xs text-muted-foreground">
-                    {apparel.length} variant{apparel.length === 1 ? "" : "s"}
+                    {supplement.length} variant{supplement.length === 1 ? "" : "s"}
                   </span>
                 </div>
-                <StockLedgerTable rows={apparel} emptyHint="No clothing variants in stock." />
+                <StockLedgerTable rows={supplement} emptyHint="No supplement variants in stock." />
               </section>
               <section className="space-y-3">
                 <div className="flex items-baseline justify-between gap-2 border-b border-border/60 pb-2">
@@ -367,8 +396,9 @@ type ValuationRow = {
   variantId: string;
   sku: string;
   productName: string;
-  colorName?: string | null;
-  sizeLabel?: string | null;
+  brandName?: string | null;
+  flavourName?: string | null;
+  packSizeLabel?: string | null;
   quantityOnHand: number;
   unitCostWac: number | null;
   valuation: number;
@@ -437,7 +467,10 @@ function ValuationTab() {
                 {rows.map((r) => (
                   <TableRow key={r.variantId}>
                     <TableCell className="font-mono text-xs">
-                      <ColorLabel colorName={r.colorName}>{r.sku}</ColorLabel>
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        <BrandTag brand={r.brandName} />
+                        <FlavourLabel flavour={r.flavourName}>{r.sku}</FlavourLabel>
+                      </span>
                     </TableCell>
                     <TableCell className="text-sm">{r.productName}</TableCell>
                     <TableCell className="text-right tabular-nums">{r.quantityOnHand}</TableCell>
@@ -481,12 +514,12 @@ function LowStockTable({ rows }: { rows: BalanceRow[] }) {
           <TableRow key={r.variant.id}>
             <TableCell className="font-medium">{r.variant.product.name}</TableCell>
             <TableCell className="font-mono text-xs">
-              <ColorLabel colorName={r.variant.color?.name}>{r.variant.sku}</ColorLabel>
+              <FlavourLabel flavour={r.variant.flavour?.name}>{r.variant.sku}</FlavourLabel>
             </TableCell>
             <TableCell className="text-sm text-muted-foreground">
-              <ColorLabel colorName={r.variant.color?.name}>
-                {[r.variant.color?.name, r.variant.size?.label].filter(Boolean).join(" / ") || "—"}
-              </ColorLabel>
+              <FlavourLabel flavour={r.variant.flavour?.name}>
+                {[r.variant.flavour?.name, r.variant.packSize?.label].filter(Boolean).join(" / ") || "—"}
+              </FlavourLabel>
             </TableCell>
             <TableCell className="text-right">
               <Badge variant={r.quantity === 0 ? "destructive" : "warning"}>{r.quantity}</Badge>
@@ -500,15 +533,15 @@ function LowStockTable({ rows }: { rows: BalanceRow[] }) {
 
 function LowStockByKind({ rows }: { rows: BalanceRow[] }) {
   const mapped = rows.map((r) => ({ ...r, productKind: r.variant.product.kind }));
-  const { apparel, accessory } = splitByProductKind(mapped);
+  const { supplement, accessory } = splitByProductKind(mapped);
   return (
     <div className="space-y-8">
       <section className="space-y-3">
-        <h3 className="text-sm font-semibold border-b border-border/60 pb-2">{kindLabel("APPAREL")}</h3>
-        {apparel.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No low-stock clothing.</p>
+        <h3 className="text-sm font-semibold border-b border-border/60 pb-2">{kindLabel("SUPPLEMENT")}</h3>
+        {supplement.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No low-stock supplements.</p>
         ) : (
-          <LowStockTable rows={apparel} />
+          <LowStockTable rows={supplement} />
         )}
       </section>
       <section className="space-y-3">

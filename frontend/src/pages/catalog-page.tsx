@@ -1,8 +1,9 @@
-import { ChevronLeft, ChevronRight, Loader2, PackagePlus, Palette, Pencil, Plus, Rows3, Ruler, Tag, Trash2, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2, PackagePlus, Palette, Pencil, Plus, Rows3, Ruler, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { ColorLabel } from "@/components/catalog/color-dot";
+import { BrandTag } from "@/components/catalog/brand-tag";
+import { FlavourLabel } from "@/components/catalog/flavour-label";
 import { SkuLookupCard } from "@/components/catalog/sku-lookup-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +16,14 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  PACK_MEASURES,
+  PACK_PRESETS,
+  measureHint,
+  measureLabel,
+  parsePackSizeLabel,
+  type PackMeasure,
+} from "@/lib/pack-size";
 import {
   Sheet,
   SheetContent,
@@ -36,12 +45,41 @@ import { fetchAllPaginated } from "@/lib/fetch-paginated";
 import { kindLabel, splitByProductKind } from "@/lib/product-kind";
 import { cn } from "@/lib/utils";
 
-type Category = { id: string; name: string; slug: string };
-type Color = { id: string; name: string };
-type Size = { id: string; label: string; code: string };
+type Flavour = { id: string; name: string };
+type PackSize = { id: string; label: string; code: string; measure: string };
 
-const KINDS = ["APPAREL", "ACCESSORY"] as const;
-const GENDERS = ["MENS", "WOMENS", "UNISEX", "KIDS", "NOT_APPLICABLE"] as const;
+const KINDS = ["SUPPLEMENT", "ACCESSORY"] as const;
+type BrandRef = { id: string; name: string; slug: string };
+
+/**
+ * Preview of the SKU the SERVER will generate: BRAND-PRODUCT-FLAVOUR-PACKSIZE.
+ * Mirrors generateUniqueSku() in backend/src/modules/catalog/variant.service.ts —
+ * keep the two in sync. Shown read-only; the server remains the source of truth
+ * and adds a -2 suffix if a code is somehow already taken.
+ */
+function skuToken(value: string, max: number): string {
+  return value
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, max)
+    .replace(/-+$/, "");
+}
+
+function previewSku(
+  brandName: string | undefined,
+  productName: string,
+  flavourName: string | undefined,
+  packCode: string | undefined,
+): string {
+  const parts = [
+    brandName ? skuToken(brandName, 18) : "",
+    skuToken(slugify(productName || "sku"), 22),
+    flavourName ? skuToken(flavourName, 12) : "",
+    packCode ? skuToken(packCode, 8) : "",
+  ].filter(Boolean);
+  return parts.join("-").slice(0, 58).replace(/-+$/, "") || "SKU";
+}
 
 function slugify(name: string) {
   return name
@@ -63,20 +101,27 @@ function AuthGate() {
   );
 }
 
-type MatrixRow = { colorId: string; sizeId: string; sku: string; key: string };
+type MatrixRow = { flavourId: string; packSizeId: string; sku: string; key: string };
 
 type CatalogProductRow = {
   id: string;
   name: string;
-  brand: string | null;
   kind: string;
-  category: { name: string };
+  /** Brands come from the VARIANTS now — one product can span several companies. */
+  variants?: { brand: { id: string; name: string; slug: string } | null }[];
   _count?: { variants: number };
 };
 
+/** Distinct company names across a product's variants. */
+function productBrandNames(p: CatalogProductRow): string[] {
+  const set = new Set<string>();
+  for (const v of p.variants ?? []) if (v.brand?.name) set.add(v.brand.name);
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
+
 const BLUEPRINT_STEPS = [
   { n: 1, title: "Identity", sub: "Classification" },
-  { n: 2, title: "Variants", sub: "Colours, sizes & SKUs" },
+  { n: 2, title: "Variants", sub: "Flavours, pack sizes & SKUs" },
   { n: 3, title: "Pricing & tax", sub: "Shelf economics" },
   { n: 4, title: "Complete", sub: "Ready for stock" },
 ] as const;
@@ -87,8 +132,9 @@ const selectControl =
 type SkuVariant = {
   id: string;
   sku: string;
-  color: { name: string } | null;
-  size: { label: string } | null;
+  brand: { name: string } | null;
+  flavour: { name: string } | null;
+  packSize: { label: string } | null;
 };
 
 function ProductSkuDialog({
@@ -188,7 +234,7 @@ function ProductSkuDialog({
   }
 
   function variantLabel(v: SkuVariant) {
-    const parts = [v.color?.name, v.size?.label].filter(Boolean);
+    const parts = [v.flavour?.name, v.packSize?.label].filter(Boolean);
     return parts.length > 0 ? parts.join(" · ") : "Default";
   }
 
@@ -218,9 +264,10 @@ function ProductSkuDialog({
                 <li key={v.id} className="flex flex-col gap-2 bg-background px-4 py-3">
                   <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0">
-                      <ColorLabel colorName={v.color?.name}>
+                      <BrandTag brand={v.brand?.name} className="mb-1" />
+                      <FlavourLabel flavour={v.flavour?.name}>
                         <span className="text-sm font-medium">{variantLabel(v)}</span>
-                      </ColorLabel>
+                      </FlavourLabel>
                     </div>
                     {!isEditing && !confirmingDelete ? (
                       <div className="flex shrink-0 gap-1">
@@ -343,8 +390,7 @@ function CatalogProductCard({
           </Badge>
         </div>
         <CardDescription>
-          {p.category.name}
-          {p.brand ? ` · ${p.brand}` : ""}
+          {productBrandNames(p).length > 0 ? productBrandNames(p).join(", ") : "No brand"}
         </CardDescription>
       </CardHeader>
       <CardContent className="text-xs text-muted-foreground">
@@ -362,10 +408,10 @@ function CatalogBrowseByKind({
   rows: CatalogProductRow[];
   onProductClick: (p: CatalogProductRow) => void;
 }) {
-  const { apparel, accessory } = splitByProductKind(rows);
+  const { supplement, accessory } = splitByProductKind(rows);
   return (
     <div className="space-y-8">
-      <CatalogKindSection title={kindLabel("APPAREL")} products={apparel} onProductClick={onProductClick} />
+      <CatalogKindSection title={kindLabel("SUPPLEMENT")} products={supplement} onProductClick={onProductClick} />
       <CatalogKindSection title={kindLabel("ACCESSORY")} products={accessory} onProductClick={onProductClick} />
     </div>
   );
@@ -435,16 +481,18 @@ export function CatalogPage() {
   const [activeBrand, setActiveBrand] = useState<string | null>(null); // null = All brands
 
   const [step, setStep] = useState(1);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [colors, setColors] = useState<Color[]>([]);
-  const [sizes, setSizes] = useState<Size[]>([]);
+  const [colors, setColors] = useState<Flavour[]>([]);
+  const [sizes, setSizes] = useState<PackSize[]>([]);
   const [loadingRef, setLoadingRef] = useState(true);
 
   const [pName, setPName] = useState("");
-  const [pKind, setPKind] = useState<(typeof KINDS)[number]>("APPAREL");
-  const [pGender, setPGender] = useState<(typeof GENDERS)[number]>("UNISEX");
-  const [pBrand, setPBrand] = useState("");
-  const [pCategoryId, setPCategoryId] = useState("");
+  const [pKind, setPKind] = useState<(typeof KINDS)[number]>("SUPPLEMENT");
+  const [pHsnCode, setPHsnCode] = useState("");
+  const [pBrandId, setPBrandId] = useState("");
+  const [brandOptions, setBrandOptions] = useState<BrandRef[]>([]);
+  const [sheetBrandOpen, setSheetBrandOpen] = useState(false);
+  const [newBrandName, setNewBrandName] = useState("");
+  const [sheetBrandBusy, setSheetBrandBusy] = useState(false);
 
   const [selColors, setSelColors] = useState<string[]>([]);
   const [selSizes, setSelSizes] = useState<string[]>([]);
@@ -466,33 +514,27 @@ export function CatalogPage() {
   const [nameMatches, setNameMatches] = useState<CatalogProductRow[]>([]);
   const [nameSearchLoading, setNameSearchLoading] = useState(false);
 
-  const [sheetCatOpen, setSheetCatOpen] = useState(false);
-  const [newCatName, setNewCatName] = useState("");
-  const [newCatSlug, setNewCatSlug] = useState("");
-  const [slugTouched, setSlugTouched] = useState(false);
-  const [sheetCatBusy, setSheetCatBusy] = useState(false);
 
-  const [sheetColOpen, setSheetColOpen] = useState(false);
-  const [newColName, setNewColName] = useState("");
-  const [sheetColBusy, setSheetColBusy] = useState(false);
+  const [sheetFlavourOpen, setSheetFlavourOpen] = useState(false);
+  const [newFlavourName, setNewFlavourName] = useState("");
+  const [sheetFlavourBusy, setSheetFlavourBusy] = useState(false);
 
   const [sheetSizeOpen, setSheetSizeOpen] = useState(false);
   const [newSizeLabel, setNewSizeLabel] = useState("");
-  const [newSizeCode, setNewSizeCode] = useState("");
+  const [newSizeMeasure, setNewSizeMeasure] = useState<PackMeasure>("WEIGHT");
   const [sheetSizeBusy, setSheetSizeBusy] = useState(false);
 
   const loadRef = useCallback(async () => {
     setLoadingRef(true);
     try {
-      const [cats, col, siz] = await Promise.all([
-        apiGetJsonAuthedWithMeta<Category[]>("/api/v1/catalog/categories?limit=200"),
-        apiGetJsonAuthedWithMeta<Color[]>("/api/v1/catalog/reference/colors?limit=200"),
-        apiGetJsonAuthedWithMeta<Size[]>("/api/v1/catalog/reference/sizes?limit=200"),
+      const [col, siz, brs] = await Promise.all([
+        apiGetJsonAuthedWithMeta<Flavour[]>("/api/v1/catalog/reference/flavours?limit=200"),
+        apiGetJsonAuthedWithMeta<PackSize[]>("/api/v1/catalog/reference/pack-sizes?limit=200"),
+        apiGetJsonAuthedWithMeta<BrandRef[]>("/api/v1/catalog/reference/brands?limit=200"),
       ]);
-      setCategories(cats.data);
       setColors(col.data);
       setSizes(siz.data);
-      setPCategoryId((prev) => prev || cats.data[0]?.id || "");
+      setBrandOptions(brs.data);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to load reference data");
     } finally {
@@ -529,20 +571,37 @@ export function CatalogPage() {
     setList(list.includes(id) ? list.filter((x) => x !== id) : [...list, id]);
   };
 
-  async function refreshCategories(): Promise<Category[]> {
-    const { data } = await apiGetJsonAuthedWithMeta<Category[]>("/api/v1/catalog/categories?limit=200");
-    setCategories(data);
-    return data;
-  }
-
-  async function refreshColors(): Promise<Color[]> {
-    const { data } = await apiGetJsonAuthedWithMeta<Color[]>("/api/v1/catalog/reference/colors?limit=200");
+  async function refreshColors(): Promise<Flavour[]> {
+    const { data } = await apiGetJsonAuthedWithMeta<Flavour[]>("/api/v1/catalog/reference/flavours?limit=200");
     setColors(data);
     return data;
   }
 
-  async function refreshSizes(): Promise<Size[]> {
-    const { data } = await apiGetJsonAuthedWithMeta<Size[]>("/api/v1/catalog/reference/sizes?limit=200");
+  async function submitQuickBrand() {
+    const name = newBrandName.trim();
+    if (!name) {
+      toast.error("Brand name is required.");
+      return;
+    }
+    setSheetBrandBusy(true);
+    try {
+      const created = await apiPostJsonAuthed<{ id: string }>("/api/v1/catalog/reference/brands", { name });
+      const { data } = await apiGetJsonAuthedWithMeta<BrandRef[]>(
+        "/api/v1/catalog/reference/brands?limit=200",
+      );
+      setBrandOptions(data);
+      setPBrandId(created.id);
+      setSheetBrandOpen(false);
+      setNewBrandName("");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not add brand");
+    } finally {
+      setSheetBrandBusy(false);
+    }
+  }
+
+  async function refreshSizes(): Promise<PackSize[]> {
+    const { data } = await apiGetJsonAuthedWithMeta<PackSize[]>("/api/v1/catalog/reference/pack-sizes?limit=200");
     setSizes(data);
     return data;
   }
@@ -564,96 +623,76 @@ export function CatalogPage() {
     setStep(2);
   }
 
-  async function submitQuickCategory() {
-    const name = newCatName.trim();
-    const slug = newCatSlug.trim().toLowerCase();
-    if (!name || !slug) {
-      toast.error("Name and internal code (slug) are required.");
-      return;
-    }
-    setSheetCatBusy(true);
-    try {
-      const created = await apiPostJsonAuthed<{ id: string }>("/api/v1/catalog/categories", {
-        name,
-        slug,
-        description: null,
-      });
-      await refreshCategories();
-      setPCategoryId(created.id);
-      setSheetCatOpen(false);
-      setNewCatName("");
-      setNewCatSlug("");
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not create category");
-    } finally {
-      setSheetCatBusy(false);
-    }
-  }
-
-  async function submitQuickColor() {
-    const name = newColName.trim();
+  async function submitQuickFlavour() {
+    const name = newFlavourName.trim();
     if (!name) {
-      toast.error("Colour name is required.");
+      toast.error("Flavour name is required.");
       return;
     }
-    setSheetColBusy(true);
+    setSheetFlavourBusy(true);
     try {
-      const created = await apiPostJsonAuthed<{ id: string }>("/api/v1/catalog/reference/colors", {
+      const created = await apiPostJsonAuthed<{ id: string }>("/api/v1/catalog/reference/flavours", {
         name,
         hexCode: null,
       });
       await refreshColors();
       setSelColors((prev) => [...prev, created.id]);
-      setSheetColOpen(false);
-      setNewColName("");
+      setSheetFlavourOpen(false);
+      setNewFlavourName("");
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not add colour");
+      toast.error(e instanceof Error ? e.message : "Could not add flavour");
     } finally {
-      setSheetColBusy(false);
+      setSheetFlavourBusy(false);
     }
   }
 
   async function submitQuickSize() {
     const label = newSizeLabel.trim();
-    const code = newSizeCode.trim().toUpperCase();
-    if (!label || !code) {
-      toast.error("Label and code are required (code must be unique).");
+    if (!label) {
+      toast.error("Enter a pack size, e.g. 1kg, 500ml or 60 tablets.");
+      return;
+    }
+    // The label itself determines the measure and the sortable magnitude —
+    // "1kg" is WEIGHT/1000g. Reject anything we cannot read rather than guessing.
+    const parsed = parsePackSizeLabel(label);
+    if (!parsed) {
+      toast.error(`"${label}" not understood. Use a number with a unit — 1kg, 500g, 500ml, 1L — or a plain count like 60.`);
+      return;
+    }
+    if (parsed.measure !== newSizeMeasure) {
+      toast.error(
+        `"${label}" reads as ${measureLabel(parsed.measure)}, but ${measureLabel(newSizeMeasure)} is selected.`,
+      );
       return;
     }
     setSheetSizeBusy(true);
     try {
-      const created = await apiPostJsonAuthed<{ id: string }>("/api/v1/catalog/reference/sizes", {
-        label,
-        code,
+      const created = await apiPostJsonAuthed<{ id: string }>("/api/v1/catalog/reference/pack-sizes", {
+        label: parsed.label,
+        code: parsed.code,
+        measure: parsed.measure,
+        normalizedValue: parsed.normalizedValue,
       });
       await refreshSizes();
       setSelSizes((prev) => [...prev, created.id]);
       setSheetSizeOpen(false);
       setNewSizeLabel("");
-      setNewSizeCode("");
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not add size");
+      toast.error(e instanceof Error ? e.message : "Could not add pack size");
     } finally {
       setSheetSizeBusy(false);
     }
   }
 
   useEffect(() => {
-    if (!sheetCatOpen) return;
-    setNewCatName("");
-    setNewCatSlug("");
-    setSlugTouched(false);
-  }, [sheetCatOpen]);
-
-  useEffect(() => {
-    if (!sheetColOpen) return;
-    setNewColName("");
-  }, [sheetColOpen]);
+    if (!sheetFlavourOpen) return;
+    setNewFlavourName("");
+  }, [sheetFlavourOpen]);
 
   useEffect(() => {
     if (!sheetSizeOpen) return;
     setNewSizeLabel("");
-    setNewSizeCode("");
+    setNewSizeMeasure("WEIGHT");
   }, [sheetSizeOpen]);
 
   useEffect(() => {
@@ -688,7 +727,7 @@ export function CatalogPage() {
   }, [pName, view, step, productId]);
 
   useEffect(() => {
-    if (pKind !== "APPAREL" || selColors.length === 0 || selSizes.length === 0) {
+    if (pKind !== "SUPPLEMENT" || selColors.length === 0 || selSizes.length === 0) {
       setMatrix([]);
       return;
     }
@@ -699,25 +738,25 @@ export function CatalogPage() {
         const color = colors.find((x) => x.id === c)?.name ?? "c";
         const size = sizes.find((x) => x.id === s)?.code ?? "s";
         const sku = `${slug}-${color.replace(/\s+/g, "")}-${size}`.toUpperCase().slice(0, 64);
-        rows.push({ colorId: c, sizeId: s, sku, key: `${c}-${s}` });
+        rows.push({ flavourId: c, packSizeId: s, sku, key: `${c}-${s}` });
       }
     }
     setMatrix(rows);
   }, [pKind, selColors, selSizes, colors, sizes, pName]);
 
   async function persistStep1() {
-    if (!pName.trim() || !pCategoryId) {
-      toast.error("Name and category are required.");
+    if (!pName.trim()) {
+      toast.error("Product name is required.");
       return;
     }
     setBusy(true);
     try {
+      // Brand is NOT sent here — it belongs to each variant, so one product can
+      // hold the same flavour and pack size from several companies.
       const created = await apiPostJsonAuthed<{ id: string }>("/api/v1/catalog/products", {
         name: pName.trim(),
-        brand: pBrand.trim() || null,
-        categoryId: pCategoryId,
+        hsnCode: pHsnCode.trim() || null,
         kind: pKind,
-        gender: pGender,
       });
       setProductId(created.id);
       setNameMatches([]);
@@ -733,26 +772,28 @@ export function CatalogPage() {
     if (!productId) return;
     setBusy(true);
     try {
+      // SKU is omitted everywhere: the server generates a unique internal code.
+      // That matters here — two companies sharing a flavour and pack size would
+      // otherwise produce the same SKU and collide on the unique constraint.
       if (pKind === "ACCESSORY") {
-        const sku = `${slugify(pName || "acc").toUpperCase()}-OS`.slice(0, 64);
         await apiPostJsonAuthed(`/api/v1/catalog/products/${productId}/variants`, {
-          sku,
           listPrice: Number(listPrice) || 0,
-          colorId: selColors[0] || null,
-          sizeId: null,
+          brandId: pBrandId || null,
+          flavourId: selColors[0] || null,
+          packSizeId: null,
         });
       } else {
         for (const row of matrix) {
           await apiPostJsonAuthed(`/api/v1/catalog/products/${productId}/variants`, {
-            sku: row.sku,
             listPrice: 0,
-            colorId: row.colorId,
-            sizeId: row.sizeId,
+            brandId: pBrandId || null,
+            flavourId: row.flavourId,
+            packSizeId: row.packSizeId,
           });
         }
       }
-      setCgstPct(pKind === "APPAREL" ? "2.5" : "9");
-      setSgstPct(pKind === "APPAREL" ? "2.5" : "9");
+      setCgstPct(pKind === "SUPPLEMENT" ? "2.5" : "9");
+      setSgstPct(pKind === "SUPPLEMENT" ? "2.5" : "9");
       setIgstPct("0");
       setStep(3);
     } catch (e) {
@@ -798,20 +839,25 @@ export function CatalogPage() {
   // NOTE: these hooks must stay above any early return so hook order is stable.
   const brands = useMemo(() => {
     const set = new Set<string>();
-    for (const p of catalogRows) if (p.brand?.trim()) set.add(p.brand.trim());
+    for (const p of catalogRows) for (const n of productBrandNames(p)) set.add(n);
     return [...set].sort((a, b) => a.localeCompare(b));
   }, [catalogRows]);
 
   // Products shown in the grid, filtered by the active brand (null = All).
   const visibleRows = useMemo(
-    () => (activeBrand ? catalogRows.filter((p) => p.brand === activeBrand) : catalogRows),
+    () =>
+      activeBrand
+        ? catalogRows.filter((p) => productBrandNames(p).includes(activeBrand))
+        : catalogRows,
     [catalogRows, activeBrand],
   );
 
-  // Global search → jump to the picked product's brand and open it.
+  // Global search → jump to the picked item's brand and open its product.
+  // Brand lives on the VARIANT, so read it from the match itself, not from
+  // match.product (which silently yielded undefined and never set the filter).
   const handlePickSearch = useCallback(
-    (match: { product: { id: string; brand: string | null } }) => {
-      setActiveBrand(match.product.brand?.trim() || null);
+    (match: { product: { id: string }; brand: { name: string } | null }) => {
+      setActiveBrand(match.brand?.name ?? null);
       const row = catalogRows.find((p) => p.id === match.product.id);
       if (row) setSkuDialogProduct(row);
     },
@@ -980,7 +1026,7 @@ export function CatalogPage() {
         <div className="space-y-10">
           <div className="space-y-2">
             <p className="text-[10px] font-semibold uppercase tracking-[0.28em] text-muted-foreground">
-              Merchandising identity
+              Product identity
             </p>
             <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">
               Blueprint only — no stock is created until you receive goods on Purchases. You can extend your
@@ -995,7 +1041,7 @@ export function CatalogPage() {
             <Input
               value={pName}
               onChange={(e) => setPName(e.target.value)}
-              placeholder="e.g. Pro Training Tee"
+              placeholder="e.g. Gold Standard Whey"
               className="h-14 rounded-2xl border-2 border-border/70 bg-background px-4 text-lg font-semibold tracking-tight shadow-sm placeholder:font-normal placeholder:text-muted-foreground"
             />
             {nameSearchLoading ? (
@@ -1008,7 +1054,7 @@ export function CatalogPage() {
                   {nameMatches.length === 1
                     ? "A product with this name already exists."
                     : `${nameMatches.length} products with a similar name already exist.`}{" "}
-                  Add the missing size or colour to an existing product instead of creating a duplicate.
+                  Add the missing flavour or pack size to an existing product instead of creating a duplicate.
                 </p>
                 <ul className="space-y-2">
                   {nameMatches.map((p) => (
@@ -1019,7 +1065,7 @@ export function CatalogPage() {
                       <div className="min-w-0">
                         <span className="text-sm font-medium">{p.name}</span>
                         <span className="ml-2 text-xs text-muted-foreground">
-                          {p.category.name} · {p._count?.variants ?? 0} SKU
+                          {p._count?.variants ?? 0} SKU
                           {(p._count?.variants ?? 0) === 1 ? "" : "s"}
                         </span>
                       </div>
@@ -1050,12 +1096,10 @@ export function CatalogPage() {
               <div className="grid grid-cols-2 gap-2 rounded-2xl border-2 border-border/50 bg-muted/20 p-1">
                 <Button
                   type="button"
-                  variant={pKind === "APPAREL" ? "default" : "ghost"}
+                  variant={pKind === "SUPPLEMENT" ? "default" : "ghost"}
                   className="h-11 rounded-xl font-medium"
-                  onClick={() => setPKind("APPAREL")}
-                >
-                  Clothing
-                </Button>
+                  onClick={() => setPKind("SUPPLEMENT")}
+                >Supplement</Button>
                 <Button
                   type="button"
                   variant={pKind === "ACCESSORY" ? "default" : "ghost"}
@@ -1068,69 +1112,18 @@ export function CatalogPage() {
             </div>
             <div className="space-y-3">
               <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Gender
+                HSN code <span className="normal-case text-muted-foreground/70">(optional)</span>
               </Label>
-              <select
-                className={selectControl}
-                value={pGender}
-                onChange={(e) => setPGender(e.target.value as (typeof GENDERS)[number])}
-              >
-                {GENDERS.map((g) => (
-                  <option key={g} value={g}>
-                    {g === "NOT_APPLICABLE" ? "Not applicable" : g.replace(/_/g, " ")}
-                  </option>
-                ))}
-              </select>
+              <Input
+                value={pHsnCode}
+                onChange={(e) => setPHsnCode(e.target.value)}
+                placeholder="e.g. 2106"
+                className="h-11 rounded-xl border-2 border-border/60 bg-background px-4 text-sm shadow-sm"
+              />
+              <p className="text-xs text-muted-foreground">
+                Entered once per product. Leave blank and it simply won't print on the invoice.
+              </p>
             </div>
-          </div>
-
-          <div className="space-y-3">
-            <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Brand</Label>
-            <Input
-              value={pBrand}
-              onChange={(e) => setPBrand(e.target.value)}
-              placeholder="House or vendor label"
-              className="h-11 rounded-xl border-2 border-border/60 bg-background px-4 text-sm shadow-sm"
-            />
-          </div>
-
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Tag className="size-4 text-muted-foreground" aria-hidden />
-                <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  Shelf category
-                </Label>
-              </div>
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                className="h-8 rounded-full gap-1.5 px-3 text-xs font-medium"
-                onClick={() => setSheetCatOpen(true)}
-              >
-                <Plus className="size-3.5" />
-                New category
-              </Button>
-            </div>
-            <select
-              className={selectControl}
-              value={pCategoryId}
-              onChange={(e) => setPCategoryId(e.target.value)}
-            >
-              {categories.length === 0 ? (
-                <option value="">Add a category to continue</option>
-              ) : (
-                categories.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))
-              )}
-            </select>
-            <p className="text-[11px] text-muted-foreground">
-              Categories power reporting filters and POS search — keep the tree tight and retail-meaningful.
-            </p>
           </div>
 
           <div className="flex flex-wrap justify-end gap-3 border-t border-border/50 pt-8">
@@ -1138,7 +1131,7 @@ export function CatalogPage() {
               type="button"
               size="lg"
               className="rounded-full px-10 font-semibold shadow-md"
-              disabled={busy || !pName.trim() || !pCategoryId}
+              disabled={busy || !pName.trim()}
               onClick={() => void persistStep1()}
             >
               {busy ? (
@@ -1161,12 +1154,50 @@ export function CatalogPage() {
         <div className="space-y-6 rounded-2xl border border-border/50 bg-muted/5 p-6 shadow-inner sm:p-8">
           <div className="space-y-1">
             <p className="text-sm text-muted-foreground">
-              {pKind === "APPAREL"
-                ? "Choose colour and size chips, then refine SKU per combination."
-                : "One sellable SKU — optional colour chip."}
+              {pKind === "SUPPLEMENT"
+                ? "Pick the company, then the flavours and pack sizes it supplies."
+                : "One sellable item — pick the company and an optional flavour."}
             </p>
           </div>
-            {pKind === "APPAREL" ? (
+
+          {/* Brand sits on the VARIANT, so the same flavour + pack size can come
+              from two companies and stay distinct. Add one company's range, save,
+              then come back and add the next company's. */}
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Company / brand
+              </Label>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                className="h-8 rounded-full gap-1.5 px-3 text-xs font-medium"
+                onClick={() => setSheetBrandOpen(true)}
+              >
+                <Plus className="size-3.5" />
+                New brand
+              </Button>
+            </div>
+            <select
+              className={selectControl}
+              value={pBrandId}
+              onChange={(e) => setPBrandId(e.target.value)}
+            >
+              <option value="">No brand</option>
+              {brandOptions.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-muted-foreground">
+              Everything you create below is tagged with this company. Chocolate 500g
+              from another company is a separate item on this same product.
+            </p>
+          </div>
+
+            {pKind === "SUPPLEMENT" ? (
               <>
                 <div className="space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1181,10 +1212,10 @@ export function CatalogPage() {
                       size="sm"
                       variant="secondary"
                       className="h-8 rounded-full gap-1 px-3 text-xs"
-                      onClick={() => setSheetColOpen(true)}
+                      onClick={() => setSheetFlavourOpen(true)}
                     >
                       <Plus className="size-3.5" />
-                      New colour
+                      New flavour
                     </Button>
                   </div>
                   <div className="flex flex-wrap gap-2">
@@ -1236,39 +1267,40 @@ export function CatalogPage() {
                     ))}
                   </div>
                 </div>
-                <p className="text-xs text-muted-foreground">{matrix.length} variants will be created.</p>
+                <p className="text-xs text-muted-foreground">
+                  {matrix.length} item{matrix.length === 1 ? "" : "s"} will be created
+                  {pBrandId
+                    ? ` for ${brandOptions.find((b) => b.id === pBrandId)?.name ?? "this company"}`
+                    : ""}
+                  .
+                </p>
                 {matrix.length > 0 ? (
                   <div className="overflow-x-auto rounded-lg border border-border/60">
-                    <table className="w-full min-w-[480px] text-left text-xs">
+                    <table className="w-full min-w-[320px] text-left text-xs">
                       <thead className="border-b border-border/60 bg-muted/40 text-muted-foreground">
                         <tr>
-                          <th className="px-2 py-2 font-medium">Colour / size</th>
-                          <th className="px-2 py-2 font-medium">SKU</th>
+                          <th className="px-2 py-2 font-medium">Company</th>
+                          <th className="px-2 py-2 font-medium">Flavour / pack size</th>
+                          <th className="px-2 py-2 font-medium">SKU (auto)</th>
                         </tr>
                       </thead>
                       <tbody>
+                        {/* SKU is read-only: generated server-side as
+                            BRAND-PRODUCT-FLAVOUR-PACKSIZE. Never typed. */}
                         {matrix.map((row) => {
-                          const colorName = colors.find((c) => c.id === row.colorId)?.name ?? "";
-                          const sizeLabel = sizes.find((s) => s.id === row.sizeId)?.label ?? "";
+                          const brandName = brandOptions.find((b) => b.id === pBrandId)?.name;
+                          const flavourName = colors.find((c) => c.id === row.flavourId)?.name ?? "";
+                          const packSize = sizes.find((s) => s.id === row.packSizeId);
                           return (
                             <tr key={row.key} className="border-b border-border/40 last:border-0">
+                              <td className="px-2 py-2 text-muted-foreground">{brandName ?? "—"}</td>
                               <td className="px-2 py-2 text-muted-foreground">
-                                <ColorLabel colorName={colorName}>
-                                  {colorName} · {sizeLabel}
-                                </ColorLabel>
+                                <FlavourLabel flavour={flavourName}>
+                                  {flavourName} · {packSize?.label ?? ""}
+                                </FlavourLabel>
                               </td>
-                              <td className="px-2 py-1">
-                                <Input
-                                  className="h-8 font-mono text-xs"
-                                  value={row.sku}
-                                  onChange={(e) =>
-                                    setMatrix((prev) =>
-                                      prev.map((r) =>
-                                        r.key === row.key ? { ...r, sku: e.target.value } : r,
-                                      ),
-                                    )
-                                  }
-                                />
+                              <td className="px-2 py-2 font-mono text-[11px] text-muted-foreground">
+                                {previewSku(brandName, pName, flavourName, packSize?.code)}
                               </td>
                             </tr>
                           );
@@ -1289,10 +1321,10 @@ export function CatalogPage() {
                     size="sm"
                     variant="secondary"
                     className="h-8 rounded-full gap-1 px-3 text-xs"
-                    onClick={() => setSheetColOpen(true)}
+                    onClick={() => setSheetFlavourOpen(true)}
                   >
                     <Plus className="size-3.5" />
-                    New colour
+                    New flavour
                   </Button>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -1322,7 +1354,7 @@ export function CatalogPage() {
               <Button
                 type="button"
                 className="rounded-full px-8 font-semibold"
-                disabled={busy || (pKind === "APPAREL" && matrix.length === 0)}
+                disabled={busy || (pKind === "SUPPLEMENT" && matrix.length === 0)}
                 onClick={() => void persistStep2()}
               >
                 Continue <ChevronRight className="ml-1 size-4" />
@@ -1334,7 +1366,7 @@ export function CatalogPage() {
       {step === 3 ? (
         <div className="space-y-6 rounded-2xl border border-border/50 bg-muted/5 p-6 shadow-inner sm:p-8">
           <p className="max-w-xl text-sm text-muted-foreground">
-            These defaults apply to every variant on this product. Clothing typically uses 5% (2.5+2.5 CGST/SGST);
+            These defaults apply to every variant on this product. Supplements use 5% (2.5+2.5 CGST/SGST);
             accessories often use 18% (9+9).
           </p>
           <div className="grid max-w-lg gap-5">
@@ -1473,76 +1505,59 @@ export function CatalogPage() {
             </div>
           </div>
 
-          <Sheet open={sheetCatOpen} onOpenChange={setSheetCatOpen}>
+          <Sheet open={sheetFlavourOpen} onOpenChange={setSheetFlavourOpen}>
             <SheetContent side="right" className="sm:max-w-md">
               <SheetHeader>
-                <SheetTitle>New shelf category</SheetTitle>
-                <SheetDescription>
-                  Appears everywhere this product is classified — POS filters, reports, and merchandising views.
-                </SheetDescription>
+                <SheetTitle>New flavour</SheetTitle>
+                <SheetDescription>Adds to your palette and selects it for this blueprint.</SheetDescription>
               </SheetHeader>
               <div className="mt-6 grid gap-4">
                 <div className="space-y-2">
-                  <Label>Display name</Label>
+                  <Label>Flavour name</Label>
                   <Input
-                    value={newCatName}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setNewCatName(v);
-                      if (!slugTouched) setNewCatSlug(slugify(v));
-                    }}
-                    placeholder="e.g. Performance tops"
+                    value={newFlavourName}
+                    onChange={(e) => setNewFlavourName(e.target.value)}
+                    placeholder="e.g. Chocolate"
                     className="h-11 rounded-xl"
                   />
                 </div>
-                <div className="space-y-2">
-                  <Label>Internal code (slug)</Label>
-                  <Input
-                    value={newCatSlug}
-                    onChange={(e) => {
-                      setSlugTouched(true);
-                      setNewCatSlug(e.target.value.toLowerCase());
-                    }}
-                    placeholder="performance-tops"
-                    className="h-11 rounded-xl font-mono text-sm"
-                  />
-                  <p className="text-[11px] text-muted-foreground">Lowercase letters, numbers, and hyphens only.</p>
-                </div>
               </div>
               <SheetFooter className="mt-8">
-                <Button type="button" variant="outline" onClick={() => setSheetCatOpen(false)}>
+                <Button type="button" variant="outline" onClick={() => setSheetFlavourOpen(false)}>
                   Cancel
                 </Button>
-                <Button type="button" disabled={sheetCatBusy} onClick={() => void submitQuickCategory()}>
-                  {sheetCatBusy ? <Loader2 className="size-4 animate-spin" /> : "Save category"}
+                <Button type="button" disabled={sheetFlavourBusy} onClick={() => void submitQuickFlavour()}>
+                  {sheetFlavourBusy ? <Loader2 className="size-4 animate-spin" /> : "Save flavour"}
                 </Button>
               </SheetFooter>
             </SheetContent>
           </Sheet>
 
-          <Sheet open={sheetColOpen} onOpenChange={setSheetColOpen}>
+          <Sheet open={sheetBrandOpen} onOpenChange={setSheetBrandOpen}>
             <SheetContent side="right" className="sm:max-w-md">
               <SheetHeader>
-                <SheetTitle>New colour</SheetTitle>
-                <SheetDescription>Adds to your palette and selects it for this blueprint.</SheetDescription>
+                <SheetTitle>New brand</SheetTitle>
+                <SheetDescription>
+                  Brands are a managed list so reports stay consistent — add each one once.
+                </SheetDescription>
               </SheetHeader>
               <div className="mt-6 grid gap-4">
                 <div className="space-y-2">
-                  <Label>Colour name</Label>
+                  <Label>Brand name</Label>
                   <Input
-                    value={newColName}
-                    onChange={(e) => setNewColName(e.target.value)}
-                    placeholder="e.g. Midnight navy"
+                    value={newBrandName}
+                    onChange={(e) => setNewBrandName(e.target.value)}
+                    placeholder="e.g. Optimum Nutrition"
                     className="h-11 rounded-xl"
                   />
                 </div>
               </div>
               <SheetFooter className="mt-8">
-                <Button type="button" variant="outline" onClick={() => setSheetColOpen(false)}>
+                <Button type="button" variant="outline" onClick={() => setSheetBrandOpen(false)}>
                   Cancel
                 </Button>
-                <Button type="button" disabled={sheetColBusy} onClick={() => void submitQuickColor()}>
-                  {sheetColBusy ? <Loader2 className="size-4 animate-spin" /> : "Save colour"}
+                <Button type="button" disabled={sheetBrandBusy} onClick={() => void submitQuickBrand()}>
+                  {sheetBrandBusy ? <Loader2 className="size-4 animate-spin" /> : "Save brand"}
                 </Button>
               </SheetFooter>
             </SheetContent>
@@ -1551,27 +1566,91 @@ export function CatalogPage() {
           <Sheet open={sheetSizeOpen} onOpenChange={setSheetSizeOpen}>
             <SheetContent side="right" className="sm:max-w-md">
               <SheetHeader>
-                <SheetTitle>New size</SheetTitle>
-                <SheetDescription>Code must be unique — used in SKU generation and exports.</SheetDescription>
+                <SheetTitle>New pack size</SheetTitle>
+                <SheetDescription>
+                  Pick how the pack is measured, then choose a common size or type your own.
+                </SheetDescription>
               </SheetHeader>
-              <div className="mt-6 grid gap-4">
+              <div className="mt-6 grid gap-5">
                 <div className="space-y-2">
-                  <Label>Label (shown on bill)</Label>
+                  <Label>Measured by</Label>
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    {PACK_MEASURES.map((m) => (
+                      <Button
+                        key={m}
+                        type="button"
+                        variant={newSizeMeasure === m ? "default" : "outline"}
+                        className="h-11 rounded-xl"
+                        onClick={() => {
+                          setNewSizeMeasure(m);
+                          setNewSizeLabel("");
+                        }}
+                      >
+                        {measureLabel(m)}
+                      </Button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground">{measureHint(newSizeMeasure)}</p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Common sizes</Label>
+                  <div className="flex flex-wrap gap-2">
+                    {PACK_PRESETS[newSizeMeasure].map((preset) => (
+                      <Button
+                        key={preset}
+                        type="button"
+                        size="sm"
+                        variant={newSizeLabel === preset ? "default" : "outline"}
+                        className="rounded-full"
+                        onClick={() => setNewSizeLabel(preset)}
+                      >
+                        {preset}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Or type it yourself</Label>
                   <Input
                     value={newSizeLabel}
                     onChange={(e) => setNewSizeLabel(e.target.value)}
-                    placeholder="e.g. Large"
+                    placeholder={
+                      newSizeMeasure === "WEIGHT"
+                        ? "e.g. 750g"
+                        : newSizeMeasure === "VOLUME"
+                          ? "e.g. 330ml"
+                          : "e.g. 45 tablets"
+                    }
                     className="h-11 rounded-xl"
                   />
-                </div>
-                <div className="space-y-2">
-                  <Label>Code (unique)</Label>
-                  <Input
-                    value={newSizeCode}
-                    onChange={(e) => setNewSizeCode(e.target.value.toUpperCase())}
-                    placeholder="L"
-                    className="h-11 rounded-xl font-mono text-sm uppercase"
-                  />
+                  {newSizeLabel.trim() ? (
+                    (() => {
+                      const parsed = parsePackSizeLabel(newSizeLabel);
+                      if (!parsed) {
+                        return (
+                          <p className="text-xs text-destructive">
+                            Not understood — use a number with a unit (1kg, 500ml) or a plain count (60).
+                          </p>
+                        );
+                      }
+                      if (parsed.measure !== newSizeMeasure) {
+                        return (
+                          <p className="text-xs text-destructive">
+                            Reads as {measureLabel(parsed.measure)}, but {measureLabel(newSizeMeasure)} is selected.
+                          </p>
+                        );
+                      }
+                      return (
+                        <p className="text-xs text-muted-foreground">
+                          Saves as <span className="font-medium text-foreground">{parsed.label}</span> · code{" "}
+                          <span className="font-mono">{parsed.code}</span> · sorts by {parsed.normalizedValue}
+                          {parsed.measure === "WEIGHT" ? "g" : parsed.measure === "VOLUME" ? "ml" : " pcs"}
+                        </p>
+                      );
+                    })()
+                  ) : null}
                 </div>
               </div>
               <SheetFooter className="mt-8">
@@ -1579,7 +1658,7 @@ export function CatalogPage() {
                   Cancel
                 </Button>
                 <Button type="button" disabled={sheetSizeBusy} onClick={() => void submitQuickSize()}>
-                  {sheetSizeBusy ? <Loader2 className="size-4 animate-spin" /> : "Save size"}
+                  {sheetSizeBusy ? <Loader2 className="size-4 animate-spin" /> : "Save pack size"}
                 </Button>
               </SheetFooter>
             </SheetContent>

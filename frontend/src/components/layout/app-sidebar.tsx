@@ -22,7 +22,7 @@ import { NavLink } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { STORE_LOGO_ALT, STORE_LOGO_PATH } from "@/lib/brand";
+import { STORE_LOGO_ALT, STORE_LOGO_MARK_PATH, STORE_LOGO_PATH } from "@/lib/brand";
 import { useUiStore } from "@/stores/ui-store";
 
 type NavItem = {
@@ -132,14 +132,16 @@ export function AppSidebar({ className }: { className?: string }) {
             <img
               src={STORE_LOGO_PATH}
               alt={STORE_LOGO_ALT}
-              className="h-10 max-w-[170px] object-contain object-left"
+              className="h-11 max-w-[190px] object-contain object-left dark:invert"
             />
           </div>
         ) : (
+          /* Collapsed rail: the square mark, since the 2.5:1 lockup would be an
+             unreadable sliver in a 32px box. */
           <img
-            src={STORE_LOGO_PATH}
+            src={STORE_LOGO_MARK_PATH}
             alt={STORE_LOGO_ALT}
-            className="mx-auto size-8 object-contain"
+            className="mx-auto size-9 object-contain dark:invert"
           />
         )}
         <Button
