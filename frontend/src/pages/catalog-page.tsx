@@ -35,6 +35,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import {
   apiDeleteAuthed,
+  apiDeleteJsonAuthed,
   apiGetJsonAuthed,
   apiGetJsonAuthedWithMeta,
   apiPatchJsonAuthed,
@@ -212,19 +213,36 @@ function ProductSkuDialog({
   async function handleDeleteVariant(variantId: string) {
     setDeletingId(variantId);
     try {
-      await apiDeleteAuthed(`/api/v1/catalog/variants/${variantId}`);
+      const res = await apiDeleteJsonAuthed<{ outcome: "deleted" | "deactivated" }>(
+        `/api/v1/catalog/variants/${variantId}`,
+      );
       const remaining = variants.filter((v) => v.id !== variantId);
       setVariants(remaining);
       setConfirmDeleteId(null);
-      toast.success("SKU deleted");
+      // A SKU with stock movements behind it is deactivated, not destroyed — the
+      // inventory ledger it appears in has to keep adding up. Say so, rather than
+      // claiming a deletion that did not happen.
+      if (res?.outcome === "deactivated") {
+        toast.success("SKU removed from the catalog", {
+          description:
+            "It has purchase or sales history, so the record is kept for your reports. The SKU code is free to use again.",
+        });
+      } else {
+        toast.success("SKU deleted");
+      }
       if (remaining.length === 0 && product) {
+        // The last SKU is gone, so the product goes with it. The API decides
+        // whether that is a real delete or a deactivation; either way it now
+        // succeeds, so a failure here is a genuine problem and must be surfaced
+        // rather than swallowed — silently ignoring it once left products that
+        // looked deleted but came back on the next refresh.
         try {
           await apiDeleteAuthed(`/api/v1/catalog/products/${product.id}`);
-        } catch {
-          // product may be soft-deleted if it has order history — either way remove from list
+          onProductDeleted(product.id);
+          onClose();
+        } catch (e) {
+          toast.error(e instanceof Error ? e.message : "Could not remove the product");
         }
-        onProductDeleted(product.id);
-        onClose();
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to delete variant");

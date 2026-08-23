@@ -202,6 +202,11 @@ model ProductVariant {
   stockAdjustmentLines StockAdjustmentLine[]
 
   @@index([productId])
+  /// Declared to match what `brand_moves_to_variant` actually created. Without it
+  /// the schema drifted from the database and the next `migrate dev` generated a
+  /// DROP INDEX for it — brand is joined in analytics and filtered in the catalog,
+  /// so losing it would be a silent regression.
+  @@index([brandId])
   @@index([flavourId])
   @@index([packSizeId])
   @@map("product_variants")
@@ -408,6 +413,12 @@ model PurchaseOrderItem {
   lineTotal         Decimal  @default(0) @map("line_total") @db.Decimal(14, 4)
   /// Per-unit pre-tax cost (for WAC / COGS); equals line taxable / qty.
   unitCostExclusive Decimal  @map("unit_cost_exclusive") @db.Decimal(14, 6)
+  /// Selling price (MRP) the owner set on this line, applied to the variant's
+  /// listPrice when the line is RECEIVED — never before, so an unreceived order
+  /// cannot move shelf prices. NULL means "leave the catalog MRP alone".
+  /// Purely a master-data instruction: it takes no part in any purchase total,
+  /// GST figure, WAC or cash calculation.
+  listPrice         Decimal? @map("list_price") @db.Decimal(12, 2)
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 

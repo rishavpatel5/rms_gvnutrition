@@ -70,8 +70,10 @@ export const catalogController = {
   },
 
   async deleteVariant(req: Request, res: Response): Promise<void> {
-    await variantService.deleteVariant(req.params.variantId!);
-    res.status(204).send();
+    // 200 with the outcome rather than a bare 204: the client has to be able to
+    // say "deleted" or "kept for your records" honestly.
+    const out = await variantService.deleteVariant(req.params.variantId!);
+    res.json({ data: out });
   },
 
   async lookupVariantBySku(req: Request, res: Response): Promise<void> {

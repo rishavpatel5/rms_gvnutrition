@@ -15,6 +15,8 @@
     "db:migrate:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "db:push": "prisma db push",
+    "db:reset-dev": "tsx scripts/reset-dev-data.ts",
+    "db:seed-suppliers": "tsx scripts/seed-suppliers.ts",
     "test": "node scripts/run-tests.mjs"
   },
   "dependencies": {

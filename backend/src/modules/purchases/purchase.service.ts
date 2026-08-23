@@ -37,6 +37,18 @@ async function resolveActorIdClient(id: string | null): Promise<string | null> {
   return u?.id ?? null;
 }
 
+/**
+ * The MRP a purchase line carries, or null for "leave the shelf price alone".
+ *
+ * A blank box and a typed 0 mean the same thing to the person receiving stock:
+ * don't touch it. Storing 0 instead would reprice the variant to free on receive,
+ * so both collapse to null here rather than at the call sites.
+ */
+function normalizeLineListPrice(value: number | undefined): Prisma.Decimal | null {
+  if (value == null || !Number.isFinite(value) || value <= 0) return null;
+  return new Prisma.Decimal(value);
+}
+
 function buildComputedPurchaseLine(
   line: PurchaseLineInput,
 ): ReturnType<typeof computeLine> {
@@ -278,6 +290,9 @@ export async function replacePurchaseLines(
           igstAmount: c.igstAmount,
           lineTotal: c.lineTotal,
           unitCostExclusive: unitEx,
+          // Held on the line until the goods actually arrive; applied to the
+          // catalog in the receive step, never here.
+          listPrice: normalizeLineListPrice(line.listPrice),
         },
       });
     }
@@ -418,9 +433,16 @@ export async function receivePurchase(
       // This is the LATEST paid rate (ex-GST), not the average. WAC — which drives
       // margin, COGS and valuation — is still derived from the purchase lines and
       // is untouched by this write.
+      //
+      // The MRP rides along the same way: when the supplier re-rates, the shelf
+      // price usually has to move with it, so the owner sets both on the line and
+      // both land the moment the goods are actually received.
       await tx.productVariant.update({
         where: { id: item.variantId },
-        data: { costPrice: item.unitCostExclusive },
+        data: {
+          costPrice: item.unitCostExclusive,
+          ...(item.listPrice ? { listPrice: item.listPrice } : {}),
+        },
       });
     }
 
@@ -524,6 +546,7 @@ export async function saveAndReceivePurchase(input: {
       variantId: string;
       quantityOrdered: number;
       unitCostExclusive: Prisma.Decimal;
+      listPrice: Prisma.Decimal | null;
     }[] = [];
 
     for (let i = 0; i < input.lines.length; i++) {
@@ -553,6 +576,7 @@ export async function saveAndReceivePurchase(input: {
           igstAmount: c.igstAmount,
           lineTotal: c.lineTotal,
           unitCostExclusive: unitEx,
+          listPrice: normalizeLineListPrice(line.listPrice),
         },
       });
       items.push({
@@ -560,6 +584,7 @@ export async function saveAndReceivePurchase(input: {
         variantId: row.variantId,
         quantityOrdered: row.quantityOrdered,
         unitCostExclusive: row.unitCostExclusive,
+        listPrice: row.listPrice,
       });
     }
 
@@ -580,11 +605,15 @@ export async function saveAndReceivePurchase(input: {
       });
 
       // Same as the staged receive path: refresh the catalog cost price to the
-      // rate just paid (ex-GST), so it never drifts from reality. WAC is derived
-      // from the purchase lines and is unaffected by this write.
+      // rate just paid (ex-GST), so it never drifts from reality, and apply the
+      // new MRP if one was set on the line. WAC is derived from the purchase
+      // lines and is unaffected by either write.
       await tx.productVariant.update({
         where: { id: it.variantId },
-        data: { costPrice: it.unitCostExclusive },
+        data: {
+          costPrice: it.unitCostExclusive,
+          ...(it.listPrice ? { listPrice: it.listPrice } : {}),
+        },
       });
     }
 

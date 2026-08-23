@@ -433,13 +433,158 @@ it can be exhaustively unit-tested (`bulk-import-catalog-plan.test.ts`, includin
 the exact interrupted-import retry). The service only performs the batched I/O.
 
 **Cleaning up an already-duplicated database.** `backend/scripts/dedupe-variants.ts`.
-Groups variants by identity, keeps one per group (most stock, then most history,
-then oldest) and deletes the rest ONLY when they are completely untouched — zero
-stock and no sale, purchase, return, adjustment or inventory-log line. Anything else
-is listed and skipped, never force-deleted. When the survivor is the retry's `-2`
-copy and the clean code is freed by a sibling in the same group, the survivor
+
+Step 1 groups variants by identity, keeps one per group (most stock, then most
+history, then oldest) and deletes the rest ONLY when they are completely untouched —
+zero stock and no sale, purchase, return, adjustment or inventory-log line. Anything
+else is listed and skipped, never force-deleted. When the survivor is the retry's
+`-2` copy and the clean code is freed by a sibling in the same group, the survivor
 reclaims it in the same transaction (nothing but the variant row stores a SKU).
-Dry run by default; `--apply` to write.
+
+Identity here is keyed on **NAMES, not foreign keys**. The interrupted run also
+duplicated the PRODUCT row, so `HYDE PRE` exists twice and its two variants
+legitimately carry different `product_id` values while being one item to the
+shopkeeper. A first pass keyed on ids cleaned only the 7 pairs that happened to
+share a product row and left the rest untouched. Flavours, brands and pack sizes
+cannot split this way — `name`/`code` are unique — so the product row is the only
+thing that ever does.
+
+Step 2 then merges the duplicate product rows: surviving variants are repointed to
+one keeper (most variants, then oldest), `offer_products` links are moved rather
+than left to CASCADE away with the shell, an HSN code present on only the absorbed
+twin is copied to the keeper, and the emptied shells are deleted. Without this the
+catalog lists the same product twice and a later import resolves the name to only
+one of them.
+
+Dry run by default; `--apply` to write. It prints the target database host (never
+credentials) first, so a destructive run cannot be pointed at the wrong DB.
+
+## 11.10 MRP ON RECEIVE STOCK — BUILT (owner-requested)
+
+Cost price already refreshed itself on every receive. The owner asked for the same
+for MRP: when a supplier puts the rate up, the shelf price usually has to follow, and
+that decision is made at the moment the goods are booked in — not later in the catalog.
+
+Receive stock now has **two** rate boxes: purchase rate and MRP. Both are pre-filled
+from the master catalog (`ProductVariant.costPrice` / `listPrice`), both editable, and
+both are written back to the catalog **when the stock is received**.
+
+  - Cost pre-fills from `costPrice`, which is itself refreshed on every receive — so it
+    is the rate actually paid last time, not a figure frozen at product creation.
+  - Each box carries the same live hint: what it was before, and how far the typed
+    value moves it (`up ₹200 (13%)`). The MRP hint also shows the resulting margin
+    against the typed cost, and warns when the MRP sits below the purchase rate.
+  - A note under both boxes says plainly that they are pre-filled, that leaving them
+    keeps the current values, and that they should be changed if the rate has moved
+    either way. Pre-filled boxes are easy to misread as "already handled".
+  - The purchase cart flags any line that repriced the shelf (`MRP ₹2,600 → ₹2,900`).
+    An MRP change is the one thing in that cart that outlives the purchase.
+
+**Blank or 0 means "leave the shelf price alone"** — `normalizeLineListPrice` collapses
+both to NULL in `purchase.service.ts`. Storing 0 would reprice the item to free.
+
+`purchase_order_items.list_price` (nullable, migration `purchase_line_mrp`) holds the
+MRP on the line until receive. It is applied by BOTH receive paths — the staged
+`receivePurchase` and the single-shot `saveAndReceivePurchase` the UI calls — so the
+staged path cannot silently drop it. **The column is master-data instruction only:**
+it takes no part in any purchase total, GST figure, WAC, COGS or cash calculation.
+Nothing in the frozen Attire math is touched.
+
+Verified end-to-end against the dev DB: rate 1600→1800 with MRP 7000→2600 applied both;
+a receive with the MRP omitted left the shelf price alone while still tracking cost;
+an explicit MRP of 0 also left it alone. Test writes were reverted afterwards.
+
+**Schema drift fixed alongside:** `product_variants_brand_id_idx` was created by the
+`brand_moves_to_variant` SQL but never declared in `schema.prisma`, so `migrate dev`
+generated a `DROP INDEX` for it. The index is now declared. Brand is joined in
+analytics and filtered in the catalog — dropping it would have been a silent
+performance regression.
+
+## 11.11 CATALOG DELETE — FIXED (raw FK error at the UI)
+
+Deleting a SKU threw a raw Prisma error into a toast:
+`Foreign key constraint violated: inventory_logs_variant_id_fkey`.
+
+Both `deleteVariant` and `deleteProduct` decided "safe to hard-delete" by counting
+**`orderItems` only**. A variant that had been PURCHASED but never sold therefore
+looked disposable and fell through to the hard delete, where the append-only
+inventory log's `Restrict` foreign key rejected it. Every one of the five relations
+— sales, purchases, returns, adjustments, inventory logs — is `Restrict` on purpose:
+a variant that has ever moved must be deactivated, never destroyed, or stock
+valuation, COGS and the reports stop reconciling.
+
+Both paths now count all five, via `src/lib/catalog-history.ts` so they cannot drift
+apart again. Behaviour:
+
+  - **Stock on hand** → still refused outright (409), unchanged.
+  - **Any history** → deactivated, SKU/slug mangled so the code is free to re-create.
+    The ledger is untouched.
+  - **Nothing at all** → hard-deleted as before.
+
+Two further faults fixed alongside:
+
+  - `deleteProduct`'s soft-delete left its variants ACTIVE, so the product vanished
+    from the catalog while its SKUs stayed sellable at the counter. Variants are now
+    deactivated with it, in one transaction.
+  - `deleteProduct`'s hard-delete path assumed the caller had already removed every
+    variant; with any still attached it hit the same `Restrict` wall. It now clears
+    balances and variants itself, so it is correct regardless of call order.
+
+The endpoint returns `{ outcome: "deleted" | "deactivated" }` instead of a bare 204,
+and the catalog page reports which actually happened — telling the shopkeeper "SKU
+deleted" when the row is deliberately still there is a lie they trip over the first
+time they open a report. The follow-up product delete in the UI also no longer
+swallows its error: that `catch {}` was hiding this very failure, leaving products
+that looked deleted and returned on the next refresh.
+
+Verified against the dev DB across all five paths — logs-but-no-sales, product
+soft-delete, untouched variant, untouched product with a variant attached, and
+stocked-variant refusal. Test writes were restored afterwards.
+
+## 11.12 DEV DATA RESET
+
+`backend/scripts/reset-dev-data.ts` empties every business table and keeps only the
+logins. Dry run by default.
+
+```
+cd backend
+npm run db:reset-dev              # show what would go — writes nothing
+npm run db:reset-dev -- --yes     # actually clear it
+```
+
+**Kept:** `users` and `refresh_tokens` (you stay signed in), `_prisma_migrations`,
+and the `invoice_sequence` singleton — RESET to 0, not deleted, so numbering
+restarts at `GVN-<year>-0000001` instead of the billing code hitting a missing row.
+
+**Cleared:** everything else — orders, purchases, returns, inventory and its ledger,
+the whole catalog (products, variants, brands, flavours, pack sizes), customers,
+suppliers, offers, expenses, capital entries, import batches, notifications,
+WhatsApp logs.
+
+The table list is read from `information_schema`, never hardcoded. The script it
+replaced (`clear-business-data.mjs`, deleted) carried a hand-written array still
+naming `categories`, `colors` and `sizes` after the nutrition refit dropped them —
+so it would have failed outright — and had never been taught about `brands`,
+`flavours`, `pack_sizes`, `expenses`, `capital_entries`, `purchase_returns`,
+`purchase_return_lines` or `bulk_import_batches`. Reading the list from the database
+is what stops that recurring.
+
+Guards: refuses `NODE_ENV=production`; prints the target host (no credentials) before
+doing anything; requires `--yes`; and afterwards asserts that the target tables are
+empty AND that the user and refresh-token counts are unchanged — a stray CASCADE
+reaching the logins is the one failure that would actually hurt, so it is checked
+rather than assumed.
+
+Verified by running the real `TRUNCATE` inside a transaction and rolling it back:
+765 rows cleared, logins untouched, sequence reset, then the dev data restored intact.
+
+**Re-seeding the suppliers afterwards:** `npm run db:seed-suppliers` puts the owner's
+33 companies back (`backend/scripts/seed-suppliers.ts`). Additive and idempotent —
+matches on name ignoring case and extra spaces, so re-running skips what is already
+there and reactivates anything previously soft-deleted rather than adding a twin.
+That matching has to live in the script because `suppliers.name` carries only an
+ordinary index, not a unique one, so the database will happily take the same company
+twice. Spellings are stored exactly as the owner gave them.
 
 ## 12. PENDING FROM OWNER
   - GV Nutrition logo PNG (placeholder used until then).

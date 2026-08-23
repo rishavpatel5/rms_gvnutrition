@@ -13,6 +13,17 @@
  * and no sale, purchase, return, adjustment or inventory-log line anywhere.
  * Anything else is skipped and listed, never force-deleted.
  *
+ * Identity is keyed on NAMES, not on foreign keys. The interrupted run also
+ * duplicated the PRODUCT row — `products.name` carries no unique index, only
+ * `slug` does — so "HYDE PRE" exists twice and its variants point at different
+ * product ids while being the same item to the shopkeeper. Keying on ids missed
+ * exactly those pairs. Flavours, brands and pack sizes cannot duplicate this way
+ * (name/code are unique), so the product row is the only thing that splits.
+ *
+ * Step 2 then merges the duplicate product rows themselves: surviving variants
+ * are repointed to one keeper and the emptied shells are removed, so the catalog
+ * stops listing the same product twice.
+ *
  * Dry run (default, writes nothing):
  *   npx tsx scripts/dedupe-variants.ts
  * Apply:
@@ -57,6 +68,23 @@ function refCount(v: Variant): number {
   );
 }
 
+const norm = (value: string): string => value.trim().toLowerCase().replace(/\s+/g, " ");
+
+/**
+ * What makes two variants the same sellable item, by NAME. Deliberately not by
+ * foreign key: the interrupted import created a second `products` row with the
+ * same name, so the duplicate pair legitimately carries two different product
+ * ids. Keying on ids left every one of those pairs behind.
+ */
+function identityKey(v: Variant): string {
+  return [
+    norm(v.product.name),
+    norm(v.brand?.name ?? ""),
+    norm(v.flavour?.name ?? ""),
+    norm(v.packSize?.label ?? ""),
+  ].join("|");
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -91,7 +119,7 @@ async function main(): Promise<void> {
 
   const groups = new Map<string, Variant[]>();
   for (const v of variants) {
-    const key = [v.productId, v.brandId ?? "", v.flavourId ?? "", v.packSizeId ?? ""].join("|");
+    const key = identityKey(v);
     const existing = groups.get(key);
     if (existing) existing.push(v);
     else groups.set(key, [v]);
@@ -146,12 +174,6 @@ async function main(): Promise<void> {
     console.log();
   }
 
-  console.log("──────────────────────────────────────────────");
-  console.log(`Duplicate groups : ${[...groups.values()].filter((g) => g.length > 1).length}`);
-  console.log(`To delete        : ${doomed.length}`);
-  console.log(`Skipped (in use) : ${skipped.length}`);
-  console.log(`SKUs to tidy up  : ${renames.length}`);
-
   // A product whose every variant is going becomes an empty shell in the catalog.
   const doomedIds = new Set(doomed.map((v) => v.id));
   const emptyProducts = new Map<string, string>();
@@ -159,33 +181,119 @@ async function main(): Promise<void> {
     const survivors = variants.filter((o) => o.productId === v.productId && !doomedIds.has(o.id));
     if (survivors.length === 0) emptyProducts.set(v.productId, v.product.name);
   }
-  console.log(`Products left empty: ${emptyProducts.size}`);
+
+  // ── Step 2: the duplicate PRODUCT rows behind those variants ───────────────
+  // Same name, two rows, because only `slug` is unique. Left alone, the catalog
+  // lists the item twice and a future import resolves the name to just one of
+  // them — so surviving variants get gathered onto a single keeper.
+  const products = await prisma.product.findMany({
+    select: {
+      id: true, name: true, slug: true, hsnCode: true, createdAt: true,
+      _count: { select: { variants: true, offerProducts: true } },
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  const byName = new Map<string, typeof products>();
+  for (const p of products) {
+    const list = byName.get(norm(p.name));
+    if (list) list.push(p);
+    else byName.set(norm(p.name), [p]);
+  }
+
+  const merges: { keeperId: string; keeperName: string; absorbIds: string[] }[] = [];
+  for (const list of byName.values()) {
+    if (list.length < 2) continue;
+    // Keeper: most variants left after the cleanup above, then the oldest row.
+    const survivingVariants = (pid: string) =>
+      variants.filter((v) => v.productId === pid && !doomedIds.has(v.id)).length;
+    const sorted = [...list].sort((a, b) => {
+      const byCount = survivingVariants(b.id) - survivingVariants(a.id);
+      if (byCount !== 0) return byCount;
+      return a.createdAt.getTime() - b.createdAt.getTime();
+    });
+    const keeper = sorted[0]!;
+    const absorb = sorted.slice(1);
+    merges.push({ keeperId: keeper.id, keeperName: keeper.name, absorbIds: absorb.map((p) => p.id) });
+    console.log(`▸ MERGE product "${keeper.name}"`);
+    console.log(`   KEEP    ${keeper.slug.padEnd(48)} variants=${survivingVariants(keeper.id)}`);
+    for (const p of absorb) {
+      console.log(`   ABSORB  ${p.slug.padEnd(48)} variants=${survivingVariants(p.id)}`);
+    }
+    console.log();
+  }
+
+  console.log("──────────────────────────────────────────────");
+  console.log(`Duplicate variant groups : ${[...groups.values()].filter((g) => g.length > 1).length}`);
+  console.log(`Variants to delete       : ${doomed.length}`);
+  console.log(`Skipped (still in use)   : ${skipped.length}`);
+  console.log(`SKUs to tidy up          : ${renames.length}`);
+  console.log(`Duplicate products to merge: ${merges.length}`);
+  console.log(`Products left empty      : ${emptyProducts.size}`);
   for (const name of emptyProducts.values()) console.log(`   · ${name}`);
 
   if (!APPLY) {
     console.log("\nNothing was written. Re-run with --apply to delete.");
     return;
   }
-  if (doomed.length === 0) {
-    console.log("\nNothing to delete.");
+  if (doomed.length === 0 && merges.length === 0) {
+    console.log("\nNothing to do.");
     return;
   }
 
-  // inventory_balances FK is onDelete: Restrict, so the balance row goes first.
-  // Both statements share one transaction: either the variant is fully gone or
-  // it is untouched — never a variant stripped of its balance.
-  const ids = [...doomedIds];
-  await prisma.$transaction([
-    prisma.inventoryBalance.deleteMany({ where: { variantId: { in: ids } } }),
-    prisma.productVariant.deleteMany({ where: { id: { in: ids } } }),
-    // Same transaction as the delete: the old code is only freed if the delete
-    // sticks, so the unique index can never see both at once.
-    ...renames.map((r) =>
-      prisma.productVariant.update({ where: { id: r.id }, data: { sku: r.to } }),
-    ),
-  ]);
-  console.log(`\nDeleted ${ids.length} duplicate variants.`);
-  if (renames.length > 0) console.log(`Restored ${renames.length} SKUs to their clean code.`);
+  if (doomed.length > 0) {
+    // inventory_balances FK is onDelete: Restrict, so the balance row goes first.
+    // One transaction: either the variant is fully gone or it is untouched —
+    // never a variant stripped of its balance.
+    const ids = [...doomedIds];
+    await prisma.$transaction([
+      prisma.inventoryBalance.deleteMany({ where: { variantId: { in: ids } } }),
+      prisma.productVariant.deleteMany({ where: { id: { in: ids } } }),
+      // Same transaction as the delete: the old code is only freed if the delete
+      // sticks, so the unique index can never see both at once.
+      ...renames.map((r) =>
+        prisma.productVariant.update({ where: { id: r.id }, data: { sku: r.to } }),
+      ),
+    ]);
+    console.log(`\nDeleted ${ids.length} duplicate variants.`);
+    if (renames.length > 0) console.log(`Restored ${renames.length} SKUs to their clean code.`);
+  }
+
+  for (const m of merges) {
+    await prisma.$transaction(async (tx) => {
+      await tx.productVariant.updateMany({
+        where: { productId: { in: m.absorbIds } },
+        data: { productId: m.keeperId },
+      });
+      // offer_products would CASCADE away with the shell; move the links instead.
+      const links = await tx.offerProduct.findMany({
+        where: { productId: { in: m.absorbIds } },
+        select: { offerId: true },
+      });
+      if (links.length > 0) {
+        await tx.offerProduct.deleteMany({ where: { productId: { in: m.absorbIds } } });
+        await tx.offerProduct.createMany({
+          data: links.map((l) => ({ offerId: l.offerId, productId: m.keeperId })),
+          skipDuplicates: true,
+        });
+      }
+      // An HSN code entered on only one of the twins would otherwise be lost.
+      const keeper = await tx.product.findUnique({
+        where: { id: m.keeperId },
+        select: { hsnCode: true },
+      });
+      if (!keeper?.hsnCode) {
+        const donor = await tx.product.findFirst({
+          where: { id: { in: m.absorbIds }, hsnCode: { not: null } },
+          select: { hsnCode: true },
+        });
+        if (donor?.hsnCode) {
+          await tx.product.update({ where: { id: m.keeperId }, data: { hsnCode: donor.hsnCode } });
+        }
+      }
+      await tx.product.deleteMany({ where: { id: { in: m.absorbIds }, variants: { none: {} } } });
+    });
+  }
+  if (merges.length > 0) console.log(`Merged ${merges.length} duplicate product rows.`);
 
   if (emptyProducts.size > 0) {
     const removed = await prisma.product.deleteMany({

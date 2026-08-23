@@ -233,3 +233,13 @@ export async function apiDeleteAuthed(path: string, init?: RequestInit): Promise
     auth: true,
   });
 }
+
+/** DELETE for endpoints that report what they did in the response body. */
+export async function apiDeleteJsonAuthed<T>(path: string, init?: RequestInit): Promise<T> {
+  const body = await fetchJsonEnvelope<T>(path, {
+    ...init,
+    method: "DELETE",
+    auth: true,
+  });
+  return body.data;
+}

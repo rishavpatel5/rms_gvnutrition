@@ -4,6 +4,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { buildMeta, parsePagination } from "../../lib/pagination.js";
 import { defaultIntraStateGstPercentages } from "../../lib/gst-defaults.js";
 import { resolveVariantUnitCosts } from "../../lib/variant-cost.js";
+import { hasVariantHistory, variantHistorySelect } from "../../lib/catalog-history.js";
 
 export async function listVariantsForProduct(
   productId: string,
@@ -333,10 +334,18 @@ export async function updateVariant(
   }
 }
 
-export async function deleteVariant(id: string): Promise<void> {
+/**
+ * `deleted` — the row is gone. `deactivated` — it had history, so it was hidden
+ * and its SKU freed. The caller needs to know which: telling the shopkeeper "SKU
+ * deleted" when the record is still there (deliberately) is a lie they will trip
+ * over the first time they look at a report.
+ */
+export type VariantDeleteOutcome = { outcome: "deleted" | "deactivated" };
+
+export async function deleteVariant(id: string): Promise<VariantDeleteOutcome> {
   const v = await prisma.productVariant.findUnique({
     where: { id },
-    include: { inventory: true, _count: { select: { orderItems: true } } },
+    include: { inventory: true, _count: { select: variantHistorySelect } },
   });
   if (!v) {
     throw new AppError(404, "VARIANT_NOT_FOUND", "Variant not found");
@@ -348,18 +357,23 @@ export async function deleteVariant(id: string): Promise<void> {
       "Cannot delete variant with positive on-hand quantity",
     );
   }
-  if (v._count.orderItems > 0) {
-    // Soft-delete: mangle the SKU so the original is free for re-creation
+  // Anything that ever moved this SKU — a purchase, a sale, a return, a write-off,
+  // or the inventory log behind them — makes it permanent. Deactivate instead, and
+  // free the SKU so the same code can be created again. Checking sales alone let a
+  // purchased-but-never-sold variant reach the hard delete below, where the
+  // append-only inventory log's Restrict FK rejected it.
+  if (hasVariantHistory(v._count)) {
     await prisma.productVariant.update({
       where: { id },
       data: { isActive: false, sku: `${v.sku}__deleted_${id.slice(-8)}` },
     });
-    return;
+    return { outcome: "deactivated" };
   }
   await prisma.$transaction(async (tx) => {
     await tx.inventoryBalance.deleteMany({ where: { variantId: id } });
     await tx.productVariant.delete({ where: { id } });
   });
+  return { outcome: "deleted" };
 }
 
 const skuLookupInclude = {

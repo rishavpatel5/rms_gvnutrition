@@ -15,6 +15,12 @@ export const purchaseLineInputSchema = z.object({
   variantId: z.string().cuid(),
   quantityOrdered: z.coerce.number().int().min(1).max(1_000_000),
   unitCost: decimalLike.min(0).max(1_000_000),
+  /**
+   * New selling price (MRP) for this variant, applied to the catalog when the
+   * line is RECEIVED. Optional: omit — or send 0 — to leave the shelf price
+   * alone. Master data only; it never enters a purchase total, GST figure or WAC.
+   */
+  listPrice: decimalLike.min(0).max(1_000_000).optional(),
   gstEnabled: z.boolean().optional().default(true),
   gstPricingMode: z.nativeEnum(GstPricingMode).optional().default(GstPricingMode.EXCLUSIVE),
   cgstRate: decimalLike.min(0).max(100).optional().default(0),

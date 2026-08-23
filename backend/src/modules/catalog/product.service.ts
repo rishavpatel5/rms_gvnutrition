@@ -3,6 +3,7 @@ import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildMeta, parsePagination } from "../../lib/pagination.js";
 import { isValidSlug, slugify } from "../../lib/slug.js";
+import { countProductVariantHistory } from "../../lib/catalog-history.js";
 
 export async function listProducts(query: Record<string, unknown>) {
   const { page, limit, skip } = parsePagination(query);
@@ -175,30 +176,54 @@ export async function deleteProduct(id: string): Promise<void> {
       "Cannot delete product while variants have on-hand quantity",
     );
   }
-  const orderLines = await prisma.orderItem.count({
-    where: { variant: { productId: id } },
+  const existing = await prisma.product.findUnique({
+    where: { id },
+    select: { slug: true },
   });
-  if (orderLines > 0) {
-    // Soft-delete: mangle slug so the original name/slug is free for re-creation
-    const existing = await prisma.product.findUnique({ where: { id }, select: { slug: true } });
-    await prisma.product.update({
-      where: { id },
-      data: { isActive: false, slug: `${existing?.slug ?? id}__deleted_${id.slice(-8)}` },
+  if (!existing) {
+    throw new AppError(404, "PRODUCT_NOT_FOUND", "Product not found");
+  }
+
+  // Same rule as deleteVariant: any movement anywhere under this product — a
+  // purchase, sale, return, write-off or inventory log — makes it permanent.
+  // Counting sales alone let a purchased-but-never-sold product reach the hard
+  // delete, where its variants' Restrict FK rejected it.
+  const history = await countProductVariantHistory(prisma, id);
+  if (history > 0) {
+    // Soft-delete: mangle slug so the original name/slug is free for re-creation.
+    // The variants go inactive with it — otherwise the product vanishes from the
+    // catalog while its SKUs stay sellable at the counter.
+    await prisma.$transaction(async (tx) => {
+      const live = await tx.productVariant.findMany({
+        where: { productId: id, isActive: true },
+        select: { id: true, sku: true },
+      });
+      for (const v of live) {
+        await tx.productVariant.update({
+          where: { id: v.id },
+          data: { isActive: false, sku: `${v.sku}__deleted_${v.id.slice(-8)}` },
+        });
+      }
+      await tx.product.update({
+        where: { id },
+        data: { isActive: false, slug: `${existing.slug}__deleted_${id.slice(-8)}` },
+      });
     });
     return;
   }
-  try {
-    await prisma.product.delete({ where: { id } });
-  } catch (e: unknown) {
-    const code =
-      typeof e === "object" && e !== null && "code" in e
-        ? String((e as { code?: string }).code)
-        : "";
-    if (code === "P2025") {
-      throw new AppError(404, "PRODUCT_NOT_FOUND", "Product not found");
+
+  // Nothing has ever touched it, so it can go for real — variants included. The
+  // caller may or may not have removed them first; handle both.
+  await prisma.$transaction(async (tx) => {
+    const variantIds = (
+      await tx.productVariant.findMany({ where: { productId: id }, select: { id: true } })
+    ).map((v) => v.id);
+    if (variantIds.length > 0) {
+      await tx.inventoryBalance.deleteMany({ where: { variantId: { in: variantIds } } });
+      await tx.productVariant.deleteMany({ where: { id: { in: variantIds } } });
     }
-    throw e;
-  }
+    await tx.product.delete({ where: { id } });
+  });
 }
 
 // ---------------------------------------------------------------------------

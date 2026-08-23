@@ -18,14 +18,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import {
   apiGetJsonAuthed,
   apiGetJsonAuthedWithMeta,
   apiPostJsonAuthed,
@@ -58,6 +50,10 @@ type VariantRow = {
   avgCost?: string | null;
   /** Rate paid on the most recent receive; null if never purchased. */
   lastCost?: string | null;
+  /** Master cost price — refreshed to the paid rate on every receive. */
+  costPrice?: string | null;
+  /** Master selling price (MRP) currently on the shelf. */
+  listPrice?: string | null;
   brand: { id: string; name: string } | null;
   flavour: { name: string } | null;
   packSize: { label: string } | null;
@@ -74,12 +70,36 @@ type CartLine = {
   flavourName: string | null;
   qty: number;
   unitCost: number;
+  /** New MRP to push to the catalog on receive; 0 leaves the shelf price alone. */
+  listPrice: number;
+  /** What the catalog says today, so the cart can show the change. */
+  currentListPrice: number;
   gstEnabled: boolean;
   gstInclusive: boolean;
   cgst: number;
   sgst: number;
   igst: number;
 };
+
+/** Decimal string from the API → a clean editable box value ("1600.00" → "1600"). */
+function moneyInput(value: string | null | undefined): string {
+  const n = Number(value ?? 0);
+  return Number.isFinite(n) && n > 0 ? String(n) : "";
+}
+
+/**
+ * How a typed rate compares with what the catalog holds today — the same phrasing
+ * for cost and for MRP, since the owner reads them together when a supplier
+ * re-rates. Empty string when there is nothing meaningful to compare against.
+ */
+function changeNote(typed: string, current: number): string {
+  const next = Number(typed);
+  if (!Number.isFinite(next) || next <= 0 || current <= 0) return "";
+  const diff = next - current;
+  if (Math.abs(diff) < 0.01) return " · unchanged";
+  const pct = Math.abs((diff / current) * 100);
+  return ` · ${diff > 0 ? "up" : "down"} ${fmtInr(Math.abs(diff))} (${pct.toFixed(0)}%)`;
+}
 
 function fmtInr(n: number) {
   return new Intl.NumberFormat("en-IN", {
@@ -138,6 +158,7 @@ export function PurchasesPage() {
 
   const [draftQty, setDraftQty] = useState(1);
   const [draftCost, setDraftCost] = useState("");
+  const [draftMrp, setDraftMrp] = useState("");
   const [draftGstEnabled, setDraftGstEnabled] = useState(true);
   const [draftGstInclusive, setDraftGstInclusive] = useState(false);
 
@@ -239,6 +260,16 @@ export function PurchasesPage() {
   );
   const selectedVariant = variants[selectedVariantIndex] ?? null;
 
+  // Pre-fill both rate boxes from the master catalog, so the ordinary case —
+  // same rate, same shelf price as last time — needs no typing at all. Both stay
+  // editable; whatever is in the boxes when the line is added is what counts.
+  // Cost price is itself refreshed on every receive, so this is the rate actually
+  // paid last time, not a figure frozen at product creation.
+  useEffect(() => {
+    setDraftCost(moneyInput(selectedVariant?.costPrice));
+    setDraftMrp(moneyInput(selectedVariant?.listPrice));
+  }, [selectedVariant]);
+
   const searchActive = searchQuery.trim().length > 0;
   const noResults = searchActive && !catalogLoading && catalog.length === 0;
 
@@ -262,6 +293,7 @@ export function PurchasesPage() {
       return;
     }
     const unit = Math.max(0, Number(draftCost) || 0);
+    const mrp = Math.max(0, Number(draftMrp) || 0);
     const qty = Math.max(1, Math.floor(draftQty) || 1);
     const rates = defaultRates(selectedProduct.kind);
     const row: CartLine = {
@@ -275,6 +307,8 @@ export function PurchasesPage() {
       flavourName: selectedVariant.flavour?.name ?? null,
       qty,
       unitCost: unit,
+      listPrice: mrp,
+      currentListPrice: Number(selectedVariant.listPrice ?? 0),
       gstEnabled: draftGstEnabled,
       gstInclusive: draftGstInclusive,
       cgst: rates.cgst,
@@ -290,6 +324,7 @@ export function PurchasesPage() {
                 ...l,
                 qty: l.qty + qty,
                 unitCost: unit > 0 ? unit : l.unitCost,
+                listPrice: mrp > 0 ? mrp : l.listPrice,
                 gstEnabled: row.gstEnabled,
                 gstInclusive: row.gstInclusive,
                 cgst: row.cgst,
@@ -302,7 +337,10 @@ export function PurchasesPage() {
       return [...prev, row];
     });
     setDraftQty(1);
-    setDraftCost("");
+    // Back to the catalog values rather than to blank: the boxes should read the
+    // same before and after adding a line, or the next add looks unset.
+    setDraftCost(moneyInput(selectedVariant.costPrice));
+    setDraftMrp(moneyInput(selectedVariant.listPrice));
   }
 
   async function receiveInventory() {
@@ -321,6 +359,8 @@ export function PurchasesPage() {
         variantId: l.variantId,
         quantityOrdered: l.qty,
         unitCost: l.unitCost,
+        // Omitted when blank/0 so the backend leaves the shelf price alone.
+        ...(l.listPrice > 0 ? { listPrice: l.listPrice } : {}),
         gstEnabled: l.gstEnabled,
         gstPricingMode: l.gstInclusive ? "INCLUSIVE" : "EXCLUSIVE",
         cgstRate: l.cgst,
@@ -371,9 +411,9 @@ export function PurchasesPage() {
       <div className="space-y-1">
         <h2 className="text-lg font-semibold tracking-tight sm:text-xl">Receive stock</h2>
         <p className="max-w-2xl text-sm text-muted-foreground">
-          Operational stock-in: search your master catalog, pick a variant, set purchase rate and GST,
-          then add to your purchase cart — same rhythm as billing. Only existing master products can be
-          received.
+          Operational stock-in: search your master catalog, pick a variant, set purchase rate, MRP and
+          GST, then add to your purchase cart — same rhythm as billing. Only existing master products
+          can be received. Receiving saves the new cost price and MRP back to the catalog.
         </p>
       </div>
 
@@ -512,44 +552,53 @@ export function PurchasesPage() {
                           </button>
                         ))}
                       </div>
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <div className="space-y-1.5">
-                          <Label className="text-xs">Quantity</Label>
-                          <div className="flex items-center gap-1 rounded-lg border border-border/80 p-0.5">
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="size-8 rounded-md"
-                              onClick={() => setDraftQty((q) => Math.max(1, q - 1))}
-                            >
-                              <Minus className="size-3.5" />
-                            </Button>
-                            <Input
-                              className="h-8 border-0 text-center text-sm tabular-nums shadow-none"
-                              type="number"
-                              min={1}
-                              value={draftQty}
-                              onChange={(e) =>
-                                setDraftQty(Math.max(1, Math.floor(Number(e.target.value) || 1)))
-                              }
-                            />
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="size-8 rounded-md"
-                              onClick={() => setDraftQty((q) => q + 1)}
-                            >
-                              <Plus className="size-3.5" />
-                            </Button>
-                          </div>
+                      {/* Quantity sits on its own narrow row. The two rate boxes are a
+                          PAIR — the owner reads cost against MRP — so they share a row
+                          and stay side by side; a three-up grid pushed MRP onto a second
+                          row on its own and left a dead half-width gap. */}
+                      <div className="space-y-1.5 sm:max-w-[220px]">
+                        <Label className="text-xs">Quantity</Label>
+                        <div className="flex items-center gap-1 rounded-lg border border-border/80 p-0.5">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="size-8 rounded-md"
+                            onClick={() => setDraftQty((q) => Math.max(1, q - 1))}
+                          >
+                            <Minus className="size-3.5" />
+                          </Button>
+                          <Input
+                            className="h-8 border-0 text-center text-sm tabular-nums shadow-none"
+                            type="number"
+                            min={1}
+                            value={draftQty}
+                            onChange={(e) =>
+                              setDraftQty(Math.max(1, Math.floor(Number(e.target.value) || 1)))
+                            }
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="size-8 rounded-md"
+                            onClick={() => setDraftQty((q) => q + 1)}
+                          >
+                            <Plus className="size-3.5" />
+                          </Button>
                         </div>
-                        <div className="space-y-1.5">
-                          <Label className="text-xs">
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        {/* Both columns use the same shape — one-line label, caption,
+                            input, hint — so the two boxes line up however the text
+                            wraps. The captions sit on their own line rather than
+                            trailing the label, which is what made the two labels
+                            different heights and staggered the inputs. */}
+                        <div className="flex flex-col gap-1.5">
+                          <Label className="text-xs leading-snug">
                             Purchase rate (unit)
-                            <span className="ml-1 font-normal text-muted-foreground">
-                              — this is the new cost price
+                            <span className="block font-normal text-muted-foreground">
+                              this is the new cost price
                             </span>
                           </Label>
                           <Input
@@ -564,26 +613,71 @@ export function PurchasesPage() {
                           {/* What this variant cost before, so a supplier re-rate is
                               obvious at the moment the new rate is typed. */}
                           {selectedVariant ? (
-                            <p className="text-[11px] leading-snug text-muted-foreground">
+                            <p className="text-[11px] leading-snug text-muted-foreground sm:min-h-[2.5rem]">
                               {selectedVariant.lastCost
                                 ? `Last bought at ${fmtInr(Number(selectedVariant.lastCost))}`
                                 : "Never purchased yet"}
-                              {selectedVariant.avgCost && Number(selectedVariant.avgCost) > 0
+                              {/* Only alongside a real purchase. With no purchase history
+                                  the WAC query falls back to the catalog cost price, so
+                                  calling it an "avg cost" would dress up the very number
+                                  already sitting in the box above. */}
+                              {selectedVariant.lastCost &&
+                              selectedVariant.avgCost &&
+                              Number(selectedVariant.avgCost) > 0
                                 ? ` · avg cost ${fmtInr(Number(selectedVariant.avgCost))}`
                                 : ""}
+                              {changeNote(draftCost, Number(selectedVariant.lastCost ?? 0))}
+                            </p>
+                          ) : null}
+                        </div>
+                        <div className="flex flex-col gap-1.5">
+                          <Label className="text-xs leading-snug">
+                            MRP (selling price)
+                            <span className="block font-normal text-muted-foreground">
+                              this is the new shelf price
+                            </span>
+                          </Label>
+                          <Input
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            placeholder="0.00"
+                            value={draftMrp}
+                            onChange={(e) => setDraftMrp(e.target.value)}
+                            className="h-9 rounded-lg text-sm tabular-nums"
+                          />
+                          {/* Mirrors the cost hint: the shelf price today, and how far
+                              the typed one moves it. When a supplier puts the rate up,
+                              this is where the owner decides whether the MRP follows. */}
+                          {selectedVariant ? (
+                            <p className="text-[11px] leading-snug text-muted-foreground sm:min-h-[2.5rem]">
+                              {Number(selectedVariant.listPrice ?? 0) > 0
+                                ? `Currently selling at ${fmtInr(Number(selectedVariant.listPrice))}`
+                                : "No selling price set yet"}
                               {(() => {
-                                const typed = Number(draftCost);
-                                const last = Number(selectedVariant.lastCost ?? 0);
-                                if (!typed || !last) return "";
-                                const diff = typed - last;
-                                if (Math.abs(diff) < 0.01) return " · same as last time";
-                                const pct = (diff / last) * 100;
-                                return ` · ${diff > 0 ? "up" : "down"} ${fmtInr(Math.abs(diff))} (${Math.abs(pct).toFixed(0)}%)`;
+                                const mrp = Number(draftMrp);
+                                const cost = Number(draftCost);
+                                if (!mrp || !cost) return "";
+                                if (mrp <= cost) return " · below your purchase rate";
+                                return ` · margin ${fmtInr(mrp - cost)} (${(((mrp - cost) / mrp) * 100).toFixed(0)}%)`;
                               })()}
+                              {changeNote(draftMrp, Number(selectedVariant.listPrice ?? 0))}
                             </p>
                           ) : null}
                         </div>
                       </div>
+                      {/* Both boxes arrive pre-filled from the master catalog, which is
+                          easy to mistake for "already handled". Say plainly that they
+                          are the values that will be saved. */}
+                      <p className="rounded-lg bg-muted/50 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+                        <span className="font-medium text-foreground">
+                          Both boxes are pre-filled from the catalog and editable.
+                        </span>{" "}
+                        If this supplier&apos;s rate has gone up or down, change it here — and
+                        change the MRP too if the shelf price should move with it. Both save
+                        to the catalog when you receive the stock. Clear the MRP box to leave
+                        the selling price as it is.
+                      </p>
                       <div className="flex flex-wrap items-center gap-4 text-sm">
                         <label className="flex cursor-pointer items-center gap-2">
                           <input
@@ -652,99 +746,97 @@ export function PurchasesPage() {
                   Cart is empty — search a master product and add lines.
                 </p>
               ) : (
-                <div className="overflow-x-auto rounded-xl border border-border/60">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Product</TableHead>
-                        <TableHead>Variant</TableHead>
-                        <TableHead className="text-right">Qty</TableHead>
-                        <TableHead className="text-right">Cost</TableHead>
-                        <TableHead className="text-right">GST</TableHead>
-                        <TableHead className="text-right">Total</TableHead>
-                        <TableHead className="w-10" />
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {lines.map((l) => {
-                        const m = lineMoney(l);
-                        const gstAmt = m.cgst + m.sgst + m.igst;
-                        return (
-                          <TableRow key={l.id}>
-                            <TableCell>
-                              <div className="text-sm font-medium leading-tight">{l.productName}</div>
-                              <div className="text-[11px] text-muted-foreground">{l.variantSku}</div>
-                            </TableCell>
-                            <TableCell className="max-w-[120px] text-xs text-muted-foreground">
+                /* A stacked list, not a table. Seven columns in a 420px sidebar
+                   squeezed the SKU into five wrapped lines and still needed a
+                   horizontal scrollbar; each line now reads top-to-bottom in the
+                   width that is actually available. */
+                <ul className="space-y-2">
+                  {lines.map((l) => {
+                    const m = lineMoney(l);
+                    const gstAmt = m.cgst + m.sgst + m.igst;
+                    return (
+                      <li
+                        key={l.id}
+                        className="space-y-2 rounded-xl border border-border/60 bg-card p-3"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 space-y-0.5">
+                            <p className="text-sm font-medium leading-tight">{l.productName}</p>
+                            <p className="truncate font-mono text-[10px] text-muted-foreground">
+                              {l.variantSku}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
                               <BrandTag brand={l.brandName} className="mr-1.5 align-middle" />
                               <FlavourLabel flavour={l.flavourName}>{l.variantDisplay}</FlavourLabel>
-                            </TableCell>
-                            <TableCell className="text-right">
-                              <div className="inline-flex items-center gap-0.5 rounded-md border border-border/70 p-0.5">
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon"
-                                  className="size-7"
-                                  onClick={() =>
-                                    setLines((prev) =>
-                                      prev.map((x) =>
-                                        x.id === l.id
-                                          ? { ...x, qty: Math.max(1, x.qty - 1) }
-                                          : x,
-                                      ),
-                                    )
-                                  }
-                                >
-                                  <Minus className="size-3" />
-                                </Button>
-                                <span className="min-w-[1.25rem] text-center text-xs tabular-nums">
-                                  {l.qty}
-                                </span>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon"
-                                  className="size-7"
-                                  onClick={() =>
-                                    setLines((prev) =>
-                                      prev.map((x) =>
-                                        x.id === l.id ? { ...x, qty: x.qty + 1 } : x,
-                                      ),
-                                    )
-                                  }
-                                >
-                                  <Plus className="size-3" />
-                                </Button>
-                              </div>
-                            </TableCell>
-                            <TableCell className="text-right text-xs tabular-nums">
-                              {fmtInr(l.unitCost)}
-                            </TableCell>
-                            <TableCell className="text-right text-xs tabular-nums">
-                              {l.gstEnabled ? fmtInr(gstAmt) : "—"}
-                            </TableCell>
-                            <TableCell className="text-right text-xs font-medium tabular-nums">
-                              {fmtInr(m.total)}
-                            </TableCell>
-                            <TableCell>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon"
-                                className="size-8 text-muted-foreground hover:text-destructive"
-                                aria-label="Remove"
-                                onClick={() => setLines((prev) => prev.filter((x) => x.id !== l.id))}
-                              >
-                                <Trash2 className="size-4" />
-                              </Button>
-                            </TableCell>
-                          </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
-                </div>
+                            </p>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+                            aria-label={`Remove ${l.productName}`}
+                            onClick={() => setLines((prev) => prev.filter((x) => x.id !== l.id))}
+                          >
+                            <Trash2 className="size-4" />
+                          </Button>
+                        </div>
+
+                        {/* An MRP change is the one thing here that outlives the
+                            purchase — it repriced the shelf. Say so before it is
+                            committed, not afterwards in the catalog. */}
+                        {l.listPrice > 0 && Math.abs(l.listPrice - l.currentListPrice) >= 0.01 ? (
+                          <p className="text-[11px] font-medium text-amber-700 dark:text-amber-500">
+                            MRP {fmtInr(l.currentListPrice)} → {fmtInr(l.listPrice)}
+                          </p>
+                        ) : null}
+
+                        <div className="flex items-end justify-between gap-2">
+                          <div className="inline-flex items-center gap-0.5 rounded-md border border-border/70 p-0.5">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="size-7"
+                              onClick={() =>
+                                setLines((prev) =>
+                                  prev.map((x) =>
+                                    x.id === l.id ? { ...x, qty: Math.max(1, x.qty - 1) } : x,
+                                  ),
+                                )
+                              }
+                            >
+                              <Minus className="size-3" />
+                            </Button>
+                            <span className="min-w-[1.5rem] text-center text-xs tabular-nums">
+                              {l.qty}
+                            </span>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="size-7"
+                              onClick={() =>
+                                setLines((prev) =>
+                                  prev.map((x) => (x.id === l.id ? { ...x, qty: x.qty + 1 } : x)),
+                                )
+                              }
+                            >
+                              <Plus className="size-3" />
+                            </Button>
+                          </div>
+                          <div className="text-right leading-tight">
+                            <p className="text-[11px] text-muted-foreground tabular-nums">
+                              {fmtInr(l.unitCost)} × {l.qty}
+                              {l.gstEnabled ? ` · GST ${fmtInr(gstAmt)}` : ""}
+                            </p>
+                            <p className="text-sm font-semibold tabular-nums">{fmtInr(m.total)}</p>
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
               )}
 
               <div className="space-y-1 rounded-lg bg-muted/30 px-3 py-2 text-sm">
