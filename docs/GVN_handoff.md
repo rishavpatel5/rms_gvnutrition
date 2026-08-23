@@ -384,6 +384,63 @@ and catalog (`product.service.ts` — matches brand, flavour, pack size and SKU 
   - WhatsApp: build the functionality now; the template NAME arrives later via
     `WATI_INVOICE_TEMPLATE_NAME`, so nothing is blocked.
 
+## 11.9 BULK IMPORT STEP 1 — REWRITTEN FOR SPEED AND RETRY SAFETY
+
+**The incident.** On the client's first real import, step 1 (catalog creation) ran for
+minutes and died part-way. They restarted it and ended up with every product twice:
+an orphan on the clean SKU with 0 stock, and a `-2` twin holding the real stock.
+Step 2 (receive stock) was never at fault.
+
+**Why it was slow.** `commitCatalog` issued one database round-trip per row per
+entity — an existence probe and an insert for each flavour, pack size and brand, a
+slug probe loop per product, a SKU-collision probe loop per variant, then a nested
+create. Several thousand SEQUENTIAL queries for a few hundred rows. At the ~100 ms
+round-trip of the Supabase pooler that is minutes of wall clock.
+
+**Why it duplicated.** Two separate faults, both fixed:
+  - The commit trusted the SCAN payload, which was computed *before* the failed run
+    wrote anything. On the retry every row still said "create", so
+    `generateImportSku` found the SKU taken and appended `-2`.
+  - Products were matched only within the current request, never against the
+    database. `products.name` has no unique index (only `slug` does), so the retry
+    happily created a second product under slug `…-1`.
+
+**What it does now.**
+  - Every table is read ONCE into a Map, resolved in memory, and written with
+    `createMany`. A fixed ~17 queries regardless of sheet size.
+  - Slugs and SKUs are made unique against in-memory sets (`claimUnique`,
+    `claimUniqueSku`) instead of a query per candidate. The SKU set holds
+    UPPERCASE, because Postgres' unique index is case-sensitive and would
+    otherwise accept a lowercase twin.
+  - Every row is re-resolved against the CURRENT database at commit time: by
+    explicit SKU, then by identity (product + brand + flavour + pack size, **by
+    ID**, so `500 g` vs `500g` spelling drift cannot fool it). Anything already
+    present is reused and its price fields refreshed — never created again.
+  - The refresh path is one `UPDATE … FROM (VALUES …)`, not one statement per row.
+    That path matters most on a retry, where every row resolves to an existing
+    variant; 400 individual updates took ~22 s, which is how a re-run could time
+    out all over again.
+  - The `bulk_import_batches` row is written LAST. Created up-front, it survived a
+    failed run and left a phantom AWAITING_STOCK batch nothing could receive against.
+
+**Measured on the dev DB, 400 rows** (100 products, 3 brands, 400 variants):
+  - first run **1.9 s**; retry of the same payload **0.9 s**
+  - duplicates created by the retry: **0**; variants missing an inventory balance: **0**
+
+**Where the logic lives.** The create-vs-reuse decision is in
+`src/lib/bulk-import-catalog-plan.ts` — deliberately pure, with no Prisma calls, so
+it can be exhaustively unit-tested (`bulk-import-catalog-plan.test.ts`, including
+the exact interrupted-import retry). The service only performs the batched I/O.
+
+**Cleaning up an already-duplicated database.** `backend/scripts/dedupe-variants.ts`.
+Groups variants by identity, keeps one per group (most stock, then most history,
+then oldest) and deletes the rest ONLY when they are completely untouched — zero
+stock and no sale, purchase, return, adjustment or inventory-log line. Anything else
+is listed and skipped, never force-deleted. When the survivor is the retry's `-2`
+copy and the clean code is freed by a sibling in the same group, the survivor
+reclaims it in the same transaction (nothing but the variant row stores a SKU).
+Dry run by default; `--apply` to write.
+
 ## 12. PENDING FROM OWNER
   - GV Nutrition logo PNG (placeholder used until then).
   - `STORE_GSTIN` (placeholder used until then).

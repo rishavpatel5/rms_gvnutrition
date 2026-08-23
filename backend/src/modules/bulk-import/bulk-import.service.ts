@@ -3,8 +3,14 @@ import { read as xlsxRead, utils as xlsxUtils } from "xlsx";
 import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { computeLine, computeOrderTotals } from "../../lib/gst-calculator.js";
-import { resolveVariantMasterUpdate } from "../../lib/bulk-import-variant-update.js";
-import { parsePackSizeLabel } from "../../lib/pack-size.js";
+import { parsePackSizeLabel, type ParsedPackSize } from "../../lib/pack-size.js";
+import {
+  claimUnique,
+  normKey,
+  planVariantWrites,
+  slugify,
+  variantIdentity,
+} from "../../lib/bulk-import-catalog-plan.js";
 
 // Nutrition column layout. `gender` is gone, colour/size became flavour/pack_size,
 // and hsn_code is appended as an optional trailing column.
@@ -180,52 +186,14 @@ export type RollbackResult = {
   unitsReturned: number;
 };
 
-// ── Helper ──────────────────────────────────────────────────────────────────
+// Rows per bulk INSERT, and rows per set-based UPDATE ... FROM (VALUES …).
+const WRITE_CHUNK = 1000;
+const UPDATE_CHUNK = 1000;
 
-async function uniqueSlug(base: string): Promise<string> {
-  let slug = base, i = 1;
-  while (await prisma.product.findUnique({ where: { slug } })) slug = `${base}-${i++}`;
-  return slug;
-}
-
-/** One SKU segment: uppercase, hyphenated, length-capped. */
-function skuToken(value: string, max: number): string {
-  return value
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, max)
-    .replace(/-+$/, "");
-}
-
-/**
- * Generate BRAND-PRODUCT-FLAVOUR-PACKSIZE for an import row whose SKU cell is blank.
- * Mirrors generateUniqueSku() in catalog/variant.service.ts — keep the two in sync.
- */
-async function generateImportSku(
-  brand: string,
-  productName: string,
-  flavour: string,
-  packSize: string,
-): Promise<string> {
-  const parts = [
-    brand ? skuToken(brand, 18) : "",
-    skuToken(productName, 22),
-    flavour ? skuToken(flavour, 12) : "",
-    packSize ? skuToken(packSize, 10) : "",
-  ].filter(Boolean);
-  const base = parts.join("-").slice(0, 58).replace(/-+$/, "") || "SKU";
-
-  let candidate = base;
-  for (let n = 2; n < 1000; n++) {
-    const clash = await prisma.productVariant.findUnique({
-      where: { sku: candidate },
-      select: { id: true },
-    });
-    if (!clash) return candidate;
-    candidate = `${base}-${n}`;
-  }
-  throw new AppError(409, "SKU_GENERATION_FAILED", "Could not generate a unique SKU");
+function chunked<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
 // ── Scan ────────────────────────────────────────────────────────────────────
@@ -506,9 +474,24 @@ export async function scanImportFile(buffer: Buffer): Promise<ScanResult> {
 //   movements. This is the section that truly requires atomicity.
 
 // ── STEP 1: Catalog only (no stock) ──────────────────────────────────────────
-// Creates colors, sizes, categories, products and variants. Marks the batch
-// AWAITING_STOCK. No purchase orders or inventory movements happen here, so a
-// failure mid-way can never leave stock half-applied.
+// Creates flavours, pack sizes, brands, products and variants, then marks the
+// batch AWAITING_STOCK. No purchase orders or inventory movements happen here,
+// so a failure mid-way can never leave stock half-applied.
+//
+// SET-BASED ON PURPOSE. The first version issued a round-trip per row per entity
+// (existence probe, slug probe, SKU-collision probe, create, nested balance
+// create). A 500-row sheet meant several thousand SEQUENTIAL queries; at the
+// ~100 ms round-trip of a pooled cloud Postgres that is minutes of wall clock,
+// and a real import timed out half-way through. Everything below reads each
+// table ONCE, resolves in memory, and writes with createMany — a fixed handful
+// of queries no matter how big the sheet is.
+//
+// IDEMPOTENT ON PURPOSE. Re-running an interrupted import must not double the
+// catalog. Every row is re-resolved against the CURRENT database at commit time
+// rather than trusting the scan payload, which was computed before the failed
+// run wrote anything: first by explicit SKU, then by identity (product + brand +
+// flavour + pack size). Anything already present is reused and refreshed, never
+// created a second time. That is what stops the "-2" twin of every row.
 export async function commitCatalog(
   input: CommitRequest,
   createdById: string | null,
@@ -516,166 +499,241 @@ export async function commitCatalog(
   let newFlavoursCreated = 0, newPackSizesCreated = 0, newBrandsCreated = 0;
   let newProductsCreated = 0, newVariantsCreated = 0, variantsUpdated = 0;
 
-  // Create the batch up-front, marked AWAITING_STOCK until step 2 receives stock.
+  // The batch row is written LAST, once the catalog is actually in place. Created
+  // up-front it survived a failed run and left a phantom AWAITING_STOCK batch in
+  // the list that no stock could ever be received against.
+
+  // ── 1. Reference data: read each table once, fill the gaps in one write ─────
+
+  // 1a. Flavours. Matched case-insensitively so "Chocolate" and "chocolate"
+  //     never become two rows (the unique index on name is case-SENSITIVE and
+  //     would happily accept both).
+  const flavourRows = await prisma.flavour.findMany({ select: { id: true, name: true } });
+  const flavourByName = new Map<string, string>();
+  for (const f of flavourRows) flavourByName.set(normKey(f.name), f.id);
+
+  const wantedFlavours = new Map<string, string>(); // normalized → spelling to store
+  for (const row of input.rows) {
+    const name = row.raw.flavour?.trim();
+    if (!name || row.flavourId) continue;
+    const key = normKey(name);
+    if (!flavourByName.has(key)) wantedFlavours.set(key, name);
+  }
+  if (wantedFlavours.size > 0) {
+    const res = await prisma.flavour.createMany({
+      data: [...wantedFlavours.values()].map((name) => ({ name })),
+      skipDuplicates: true,
+    });
+    newFlavoursCreated = res.count;
+    const added = await prisma.flavour.findMany({
+      where: { name: { in: [...wantedFlavours.values()] } },
+      select: { id: true, name: true },
+    });
+    for (const f of added) flavourByName.set(normKey(f.name), f.id);
+  }
+
+  // 1b. Pack sizes. The raw label is canonicalised first, so "500 g", "500G" and
+  //     "500grams" collapse to a single row instead of colliding on the unique
+  //     code. Both unique keys are checked — `code` and (measure, label).
+  const packRows = await prisma.packSize.findMany({
+    select: { id: true, code: true, measure: true, label: true },
+  });
+  const packByCode = new Map<string, string>();
+  const packByMeasureLabel = new Map<string, string>();
+  for (const p of packRows) {
+    packByCode.set(p.code, p.id);
+    packByMeasureLabel.set(`${p.measure}||${normKey(p.label)}`, p.id);
+  }
+
+  const wantedPacks = new Map<string, ParsedPackSize>(); // canonical code → parsed
+  for (const row of input.rows) {
+    const rawLabel = row.raw.pack_size?.trim();
+    if (!rawLabel || row.packSizeId) continue;
+    const parsed = parsePackSizeLabel(rawLabel);
+    if (!parsed) {
+      // Scan already rejects unparseable labels; guard anyway rather than guess a measure.
+      throw new AppError(400, "INVALID_PACK_SIZE", `Pack size "${rawLabel}" could not be parsed`);
+    }
+    if (packByCode.has(parsed.code)) continue;
+    if (packByMeasureLabel.has(`${parsed.measure}||${normKey(parsed.label)}`)) continue;
+    wantedPacks.set(parsed.code, parsed);
+  }
+  if (wantedPacks.size > 0) {
+    const res = await prisma.packSize.createMany({
+      data: [...wantedPacks.values()].map((p) => ({
+        label: p.label,
+        code: p.code,
+        measure: p.measure,
+        normalizedValue: p.normalizedValue,
+      })),
+      skipDuplicates: true,
+    });
+    newPackSizesCreated = res.count;
+    const added = await prisma.packSize.findMany({
+      where: { code: { in: [...wantedPacks.keys()] } },
+      select: { id: true, code: true },
+    });
+    for (const p of added) packByCode.set(p.code, p.id);
+  }
+
+  // 1c. Brands. Slugs are made unique in memory against the slugs already in the
+  //     table plus the ones queued in this same batch.
+  const brandRows = await prisma.brand.findMany({ select: { id: true, name: true, slug: true } });
+  const brandByName = new Map<string, string>();
+  const takenBrandSlugs = new Set<string>();
+  for (const b of brandRows) {
+    brandByName.set(normKey(b.name), b.id);
+    takenBrandSlugs.add(b.slug);
+  }
+
+  const wantedBrands = new Map<string, { name: string; slug: string }>();
+  for (const row of input.rows) {
+    const name = row.raw.brand?.trim();
+    if (!name || row.brandId) continue;
+    const key = normKey(name);
+    if (brandByName.has(key) || wantedBrands.has(key)) continue;
+    wantedBrands.set(key, { name, slug: claimUnique(slugify(name) || "brand", takenBrandSlugs) });
+  }
+  if (wantedBrands.size > 0) {
+    const res = await prisma.brand.createMany({
+      data: [...wantedBrands.values()],
+      skipDuplicates: true,
+    });
+    newBrandsCreated = res.count;
+    const added = await prisma.brand.findMany({
+      where: { name: { in: [...wantedBrands.values()].map((b) => b.name) } },
+      select: { id: true, name: true },
+    });
+    for (const b of added) brandByName.set(normKey(b.name), b.id);
+  }
+
+  // ── 2. Products ────────────────────────────────────────────────────────────
+  // A product is looked up by NAME before being created. `name` carries no unique
+  // index (only `slug` does), so without this an interrupted run's second attempt
+  // would happily create "Ripped Whey" a second time under slug "ripped-whey-1".
+  const productRows = await prisma.product.findMany({ select: { id: true, name: true, slug: true } });
+  const productByName = new Map<string, string>();
+  const takenProductSlugs = new Set<string>();
+  for (const p of productRows) {
+    if (!productByName.has(normKey(p.name))) productByName.set(normKey(p.name), p.id);
+    takenProductSlugs.add(p.slug);
+  }
+
+  const wantedProducts = new Map<string, Prisma.ProductCreateManyInput>();
+  for (const row of input.rows) {
+    if (row.action !== "create_product_and_variant" || row.productId) continue;
+    const name = row.raw.product_name.trim();
+    const key = normKey(name);
+    if (productByName.has(key) || wantedProducts.has(key)) continue;
+    wantedProducts.set(key, {
+      // Brand is NOT set here — it belongs to the variant, so one product can
+      // hold the same flavour/pack size from several companies.
+      name,
+      slug: claimUnique(slugify(name) || "product", takenProductSlugs),
+      kind: row.raw.kind as ProductKind,
+      hsnCode: row.raw.hsn_code?.trim() || null,
+    });
+  }
+  if (wantedProducts.size > 0) {
+    const res = await prisma.product.createMany({
+      data: [...wantedProducts.values()],
+      skipDuplicates: true,
+    });
+    newProductsCreated = res.count;
+    const added = await prisma.product.findMany({
+      where: { slug: { in: [...wantedProducts.values()].map((p) => p.slug) } },
+      select: { id: true, name: true },
+    });
+    for (const p of added) productByName.set(normKey(p.name), p.id);
+  }
+
+  // ── 3. Variants ────────────────────────────────────────────────────────────
+  // Read the existing catalog once and build both lookup paths: exact SKU, and
+  // the identity tuple used when the sheet leaves the SKU blank.
+  const existingVariants = await prisma.productVariant.findMany({
+    select: { id: true, sku: true, productId: true, brandId: true, flavourId: true, packSizeId: true },
+  });
+  const takenSkus = new Set<string>();          // UPPERCASE, so casing can't sneak a twin in
+  const variantBySku = new Map<string, string>();
+  const variantByIdentity = new Map<string, string>();
+  for (const v of existingVariants) {
+    takenSkus.add(v.sku.toUpperCase());
+    variantBySku.set(v.sku.toUpperCase(), v.id);
+    variantByIdentity.set(variantIdentity(v.productId, v.brandId, v.flavourId, v.packSizeId), v.id);
+  }
+
+  // The decision of create-vs-reuse lives in a pure, unit-tested module: this is
+  // exactly where an interrupted import either does or does not double the
+  // catalog, so it must be verifiable without a database.
+  const { toCreate, toUpdate, unresolved } = planVariantWrites(input.rows, {
+    flavourByName,
+    packByCode,
+    brandByName,
+    productByName,
+    variantBySku,
+    variantByIdentity,
+    takenSkus,
+  });
+
+  if (unresolved.length > 0) {
+    throw new AppError(
+      500,
+      "PRODUCT_UNRESOLVED",
+      `No product could be resolved for row(s) ${unresolved.join(", ")}`,
+    );
+  }
+
+  // Chunked because a single INSERT carries one bind parameter per column per row,
+  // and Postgres caps a statement at 65535 of them. 500 variants is comfortably
+  // inside one statement; chunking only matters if the client ever imports a
+  // sheet several thousand rows long, and costs nothing when they don't.
+  for (const part of chunked(toCreate, WRITE_CHUNK)) {
+    const res = await prisma.productVariant.createMany({ data: part, skipDuplicates: true });
+    newVariantsCreated += res.count;
+
+    // createMany cannot nest the balance row, so read the ids back and insert the
+    // balances in one statement. Looking up by every queued SKU — not just the ones
+    // createMany reported as new — also back-fills a balance for any variant that
+    // lost one to an earlier half-finished run.
+    const created = await prisma.productVariant.findMany({
+      where: { sku: { in: part.map((v) => v.sku) } },
+      select: { id: true },
+    });
+    await prisma.inventoryBalance.createMany({
+      data: created.map((v) => ({ variantId: v.id, quantity: 0 })),
+      skipDuplicates: true,
+    });
+  }
+
+  // Every row carries its own values, so this is one UPDATE ... FROM (VALUES …)
+  // rather than one statement per row. It matters most on the RETRY path, where
+  // every row in the sheet resolves to an existing variant: 400 individual
+  // updates took ~22 s over the pooler, which is how a re-run could time out all
+  // over again. NULL means "leave the existing value", matching the rules in
+  // resolveVariantMasterFields exactly.
+  for (const part of chunked(toUpdate, UPDATE_CHUNK)) {
+    const values = Prisma.join(
+      part.map(
+        (u) =>
+          Prisma.sql`(${u.id}, ${u.costPrice}::numeric, ${u.listPrice}::numeric, ${u.lowStockThreshold}::int)`,
+      ),
+    );
+    await prisma.$executeRaw`
+      UPDATE product_variants AS pv
+      SET cost_price          = COALESCE(v.cost_price, pv.cost_price),
+          list_price          = COALESCE(v.list_price, pv.list_price),
+          low_stock_threshold = COALESCE(v.low_stock_threshold, pv.low_stock_threshold),
+          updated_at          = NOW()
+      FROM (VALUES ${values}) AS v(id, cost_price, list_price, low_stock_threshold)
+      WHERE pv.id = v.id
+    `;
+  }
+  variantsUpdated = toUpdate.length;
+
+  // Catalog is in place — now record the batch, AWAITING_STOCK until step 2 runs.
   const batch = await prisma.bulkImportBatch.create({
     data: { rowsImported: input.rows.length, createdById, status: "AWAITING_STOCK" },
   });
-
-  // ── Phase 1: Catalog — no wrapping transaction ──────────────────────────
-
-  // 1a. Flavours
-  const flavourMap = new Map<string, string>();
-  const pendingFlavours = new Map<string, string>();
-  for (const row of input.rows) {
-    if (row.flavourIsNew && row.raw.flavour && !row.flavourId)
-      pendingFlavours.set(row.raw.flavour.toLowerCase(), row.raw.flavour);
-  }
-  for (const [key, name] of pendingFlavours) {
-    const ex = await prisma.flavour.findFirst({ where: { name: { equals: name, mode: "insensitive" } } });
-    flavourMap.set(key, ex ? ex.id : (await prisma.flavour.create({ data: { name } })).id);
-  }
-  newFlavoursCreated = flavourMap.size;
-
-  // 1b. Pack sizes — the label is parsed into measure + normalized magnitude so
-  // auto-created rows sort correctly alongside hand-entered ones.
-  const packSizeMap = new Map<string, string>();
-  // Keyed by CANONICAL code so "500G" and "500 g" collapse to a single pending entry.
-  // Keying by raw text created two entries that both resolved to code "500G", and the
-  // second insert blew up on the unique constraint.
-  const pendingPackSizes = new Map<string, string>();
-  for (const row of input.rows) {
-    if (row.packSizeIsNew && row.raw.pack_size && !row.packSizeId) {
-      const parsed = parsePackSizeLabel(row.raw.pack_size);
-      if (parsed) pendingPackSizes.set(parsed.code, row.raw.pack_size);
-    }
-  }
-  for (const [canonicalCode, raw] of pendingPackSizes) {
-    const parsed = parsePackSizeLabel(raw);
-    if (!parsed) {
-      // Scan already rejects unparseable labels; guard anyway rather than guess a measure.
-      throw new AppError(400, "INVALID_PACK_SIZE", `Pack size "${raw}" could not be parsed`);
-    }
-    // Another import (or the catalog screen) may have created it in the meantime.
-    const ex = await prisma.packSize.findUnique({ where: { code: canonicalCode } });
-    if (ex) { packSizeMap.set(canonicalCode, ex.id); continue; }
-    packSizeMap.set(
-      canonicalCode,
-      (
-        await prisma.packSize.create({
-          data: {
-            label: parsed.label,
-            code: canonicalCode,
-            measure: parsed.measure,
-            normalizedValue: parsed.normalizedValue,
-          },
-        })
-      ).id,
-    );
-  }
-  newPackSizesCreated = packSizeMap.size;
-
-  // 1b-ii. Brands
-  const brandMap = new Map<string, string>();
-  const pendingBrands = new Map<string, string>();
-  for (const row of input.rows) {
-    if (row.brandIsNew && row.raw.brand && !row.brandId)
-      pendingBrands.set(row.raw.brand.toLowerCase(), row.raw.brand);
-  }
-  for (const [key, name] of pendingBrands) {
-    const ex = await prisma.brand.findFirst({ where: { name: { equals: name, mode: "insensitive" } } });
-    if (ex) { brandMap.set(key, ex.id); continue; }
-    let slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "brand";
-    let n = 1;
-    while (await prisma.brand.findUnique({ where: { slug } })) slug = `${slug}-${n++}`;
-    brandMap.set(key, (await prisma.brand.create({ data: { name, slug } })).id);
-  }
-  newBrandsCreated = brandMap.size;
-
-  // 1d. Products + variants
-  const productMap = new Map<string, string>();
-
-  for (const row of input.rows) {
-    const r = row.raw;
-    const resolvedFlavour =
-      row.flavourId ?? (r.flavour ? flavourMap.get(r.flavour.toLowerCase()) : undefined);
-    // packSizeMap is keyed by canonical code, so resolve through the parser.
-    const resolvedPackSize =
-      row.packSizeId ??
-      (r.pack_size ? packSizeMap.get(parsePackSizeLabel(r.pack_size)?.code ?? "") : undefined);
-    const resolvedBrand =
-      row.brandId ?? (r.brand ? brandMap.get(r.brand.toLowerCase()) : undefined);
-
-    if (row.action === "receive_only") {
-      // Existing SKU → keep the SAME variant (no duplicate) and refresh only the Excel-controlled
-      // price/threshold fields (see resolveVariantMasterUpdate for the exact rules). GST and
-      // product-level fields are intentionally left untouched (approved scope).
-      if (row.variantId) {
-        const data = resolveVariantMasterUpdate(r);
-        if (Object.keys(data).length > 0) {
-          await prisma.productVariant.update({ where: { id: row.variantId }, data });
-          variantsUpdated++;
-        }
-      }
-      continue;
-    }
-
-    let productId = row.productId;
-
-    if (row.action === "create_product_and_variant") {
-      const nameKey = r.product_name.toLowerCase();
-      if (productMap.has(nameKey)) {
-        productId = productMap.get(nameKey)!;
-      } else {
-        const base = r.product_name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-        const slug = await uniqueSlug(base);
-        const p = await prisma.product.create({
-          data: {
-            // Brand is NOT set here — it belongs to the variant, so one product
-            // can hold the same flavour/pack size from several companies.
-            name: r.product_name, slug,
-            kind: r.kind as ProductKind,
-            hsnCode: r.hsn_code || null,
-          },
-        });
-        productId = p.id;
-        productMap.set(nameKey, p.id);
-        newProductsCreated++;
-      }
-    }
-
-    if (!productId) throw new Error(`Row ${row.rowNum}: no product ID resolved`);
-
-    // A blank SKU column means "generate one" — same BRAND-PRODUCT-FLAVOUR-PACKSIZE
-    // rule the catalog screen uses, with a numeric suffix if that code is taken.
-    // Use the CANONICAL pack label, not the raw cell: "500 g" and "500G" must yield
-    // the same SKU, and "30 sachets" should read as 30-PCS rather than a truncated
-    // "30-SACHE" once the 8-char segment cap bites.
-    const canonicalPack = r.pack_size ? (parsePackSizeLabel(r.pack_size)?.label ?? r.pack_size) : "";
-    const variantSku = r.sku?.trim()
-      ? r.sku.trim()
-      : await generateImportSku(r.brand, r.product_name, r.flavour, canonicalPack);
-
-    // Nested create: variant + inventoryBalance in one atomic implicit transaction
-    await prisma.productVariant.create({
-      data: {
-        productId, sku: variantSku,
-        listPrice: new Prisma.Decimal(r.list_price),
-        costPrice: r.cost_price > 0 ? new Prisma.Decimal(r.cost_price) : null,
-        gstEnabled: true,
-        gstPricingMode: r.gst_inclusive ? GstPricingMode.INCLUSIVE : GstPricingMode.EXCLUSIVE,
-        cgstRate: new Prisma.Decimal(r.cgst_pct),
-        sgstRate: new Prisma.Decimal(r.sgst_pct),
-        igstRate: new Prisma.Decimal(r.igst_pct),
-        lowStockThreshold:
-          r.low_stock_threshold != null ? Math.max(0, Math.floor(r.low_stock_threshold)) : null,
-        brandId:    resolvedBrand    ?? null,
-        flavourId:  resolvedFlavour  ?? null,
-        packSizeId: resolvedPackSize ?? null,
-        inventory: { create: { quantity: 0 } },
-      },
-    });
-    newVariantsCreated++;
-  }
 
   return {
     batchId: batch.id,
