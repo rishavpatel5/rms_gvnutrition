@@ -661,6 +661,42 @@ the History tab."* History lists batches and offers a rollback — it has NO rec
 control, so that was a dead end for anyone who clicked "Not now". It now describes the
 re-upload path instead.
 
+## 11.15 SUPPLIER EDIT & DELETE — BUILT (owner-requested)
+
+The Suppliers directory was read-only: a supplier could be added but never corrected
+or removed. A typo in a name was permanent.
+
+Each row now has an inline edit (name / phone / email, Enter to save, Esc to cancel)
+and a remove with a confirm step. `PATCH /suppliers/:id` already existed and needed no
+change; `DELETE /suppliers/:id` is new.
+
+**Delete follows the same rule as the catalog (§11.11).** `purchase_orders` and
+`purchase_returns` both hold `onDelete: Restrict` on their supplier, and rightly so —
+those documents are the record of money that left the business, and every purchase
+figure, WAC input and cash movement traces back through them. So:
+
+  - **Any purchase history** → the supplier is DEACTIVATED (`isActive: false`), shown
+    as *Retired* in the directory, and no longer offered on purchase entry. History
+    intact.
+  - **Never bought from** → really deleted.
+
+The endpoint returns `{ outcome: "deleted" | "deactivated" }` and the page reports
+which actually happened, rather than claiming a deletion that did not occur.
+
+**Retired suppliers are filtered where it matters, not everywhere.** Purchase entry
+and Return-to-supplier now request `?isActive=true`; the directory deliberately still
+lists them, marked and with a restore button, because that is the screen where you
+would notice one was retired by mistake. Filtering them out of the directory too would
+have made a retired supplier unrecoverable through the UI.
+
+**Also fixed:** the Add-supplier form swallowed its errors — a rejected email or a
+failed save looked exactly like nothing happening. It now surfaces the failure.
+
+Verified against the dev DB across 8 paths: edit all fields; clear phone/email back to
+empty; delete an unused supplier (row gone); delete one with a PO (deactivated, PO
+survived); hidden from purchase entry while still in the directory; restore; and a
+404 on an unknown id. Fixtures removed afterwards.
+
 ## 12. PENDING FROM OWNER
   - GV Nutrition logo PNG (placeholder used until then).
   - `STORE_GSTIN` (placeholder used until then).

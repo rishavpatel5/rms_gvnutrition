@@ -122,3 +122,35 @@ export async function updateSupplier(
     throw e;
   }
 }
+
+/**
+ * `deleted` — the row is gone. `deactivated` — it had purchase history, so it was
+ * hidden instead and no longer offered on purchase entry.
+ */
+export type SupplierDeleteOutcome = { outcome: "deleted" | "deactivated" };
+
+/**
+ * Remove a supplier.
+ *
+ * Purchase orders and purchase returns both hold `onDelete: Restrict` on their
+ * supplier, and rightly so: those documents are the record of money that left the
+ * business, and every purchase figure, WAC input and cash movement traces back
+ * through them. A supplier that has ever been bought from is therefore DEACTIVATED,
+ * never destroyed — it disappears from the purchase-entry dropdown while its
+ * history keeps adding up. Only a supplier nothing points at is really deleted.
+ */
+export async function deleteSupplier(id: string): Promise<SupplierDeleteOutcome> {
+  const row = await prisma.supplier.findUnique({
+    where: { id },
+    select: { id: true, _count: { select: { purchaseOrders: true, purchaseReturns: true } } },
+  });
+  if (!row) throw new AppError(404, "SUPPLIER_NOT_FOUND", "Supplier not found");
+
+  if (row._count.purchaseOrders > 0 || row._count.purchaseReturns > 0) {
+    await prisma.supplier.update({ where: { id }, data: { isActive: false } });
+    return { outcome: "deactivated" };
+  }
+
+  await prisma.supplier.delete({ where: { id } });
+  return { outcome: "deleted" };
+}

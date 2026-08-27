@@ -33,3 +33,8 @@ suppliersRouter.patch(
   ...write,
   asyncHandler((req, res) => supplierController.update(req, res)),
 );
+suppliersRouter.delete(
+  "/:id",
+  ...write,
+  asyncHandler((req, res) => supplierController.remove(req, res)),
+);

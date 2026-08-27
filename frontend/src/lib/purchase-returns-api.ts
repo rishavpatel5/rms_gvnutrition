@@ -54,7 +54,7 @@ export type PurchaseReturnListRow = {
 };
 
 export async function listSuppliers(): Promise<SupplierRow[]> {
-  const { data } = await apiGetJsonAuthedWithMeta<SupplierRow[]>("/api/v1/suppliers?limit=200");
+  const { data } = await apiGetJsonAuthedWithMeta<SupplierRow[]>("/api/v1/suppliers?limit=200&isActive=true");
   return data;
 }
 

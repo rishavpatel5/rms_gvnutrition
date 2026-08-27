@@ -28,4 +28,11 @@ export const supplierController = {
     const row = await supplierService.updateSupplier(req.params.id!, body);
     res.json({ data: row });
   },
+
+  async remove(req: Request, res: Response): Promise<void> {
+    // 200 with the outcome, not a bare 204: the client has to be able to say
+    // "deleted" or "kept for your records" honestly.
+    const out = await supplierService.deleteSupplier(req.params.id!);
+    res.json({ data: out });
+  },
 };

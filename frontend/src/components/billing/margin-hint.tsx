@@ -71,15 +71,25 @@ export function VariantCostLine({
   taxableAtList,
   wac,
   lastCost,
+  wacIncl,
+  lastCostIncl,
 }: {
   taxableAtList: number;
   wac: number;
   lastCost: number | null;
+  /** The same two costs with the purchase GST added back. Null before any receive. */
+  wacIncl?: number | null;
+  lastCostIncl?: number | null;
 }) {
   if (!wac) return null;
   const { profit, pct, belowCost } = marginOf({ taxable: taxableAtList, cost: wac });
   const rateRose = lastCost != null && lastCost > wac + 0.01;
   const latestBeatsPrice = lastCost != null && lastCost >= taxableAtList;
+  // Only worth a second figure when GST was actually charged on the purchase. Many
+  // lines come in at 0% — repeating the same number under a different tag would be
+  // noise, and would imply a tax that was never paid.
+  const showWacIncl = wacIncl != null && wacIncl > wac + 0.5;
+  const showLastIncl = lastCostIncl != null && lastCost != null && lastCostIncl > lastCost + 0.5;
 
   return (
     <span className="block space-y-0.5">
@@ -89,7 +99,14 @@ export function VariantCostLine({
           belowCost ? "font-semibold text-destructive" : "text-muted-foreground",
         )}
       >
-        avg cost {inr(wac)} · {belowCost ? "LOSS " : "margin "}
+        avg cost {inr(wac)} <span className="font-normal opacity-70">(ex-GST)</span>
+        {showWacIncl ? (
+          <>
+            {" / "}
+            {inr(wacIncl!)} <span className="font-normal opacity-70">(inc GST)</span>
+          </>
+        ) : null}{" "}
+        · {belowCost ? "LOSS " : "margin "}
         {inr(profit)} ({pct.toFixed(0)}%)
       </span>
       {lastCost != null ? (
@@ -103,7 +120,14 @@ export function VariantCostLine({
                 : "text-muted-foreground",
           )}
         >
-          last bought at {inr(lastCost)}
+          last bought at {inr(lastCost)}{" "}
+          <span className="font-normal opacity-70">(ex-GST)</span>
+          {showLastIncl ? (
+            <>
+              {" / "}
+              {inr(lastCostIncl!)} <span className="font-normal opacity-70">(inc GST)</span>
+            </>
+          ) : null}
           {latestBeatsPrice
             ? " — above your selling price, raise the MRP"
             : rateRose

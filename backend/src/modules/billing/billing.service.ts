@@ -1146,19 +1146,62 @@ export async function searchPosCatalog(query: Record<string, unknown>) {
   // WAC (what the stock on hand cost) and the latest rate (what a refill costs)
   // can differ a lot. The counter needs both: WAC to price today's stock, the
   // latest rate to notice the MRP no longer covers the next delivery.
+  // Also the GST-INCLUSIVE cost — what actually left the till per unit. Taken from
+  // the purchase line itself (line_total / qty), never by applying the SALE tax rate
+  // to the ex-GST cost: the rate paid on a purchase is the rate on that purchase,
+  // and the two need not agree. Display only; WAC, COGS and valuation are untouched
+  // and still run on unit_cost_exclusive.
   const lastCostRows = variantIds.length
-    ? await prisma.$queryRaw<{ variant_id: string; unit_cost: string }[]>(Prisma.sql`
-        SELECT DISTINCT ON (poi.variant_id)
-          poi.variant_id,
-          poi.unit_cost_exclusive::text AS unit_cost
-        FROM purchase_order_items poi
-        INNER JOIN purchase_orders po ON po.id = poi.purchase_order_id
-        WHERE poi.quantity_received > 0
-          AND poi.variant_id IN (${Prisma.join(variantIds)})
-        ORDER BY poi.variant_id, po.created_at DESC
+    ? await prisma.$queryRaw<
+        { variant_id: string; unit_cost: string; unit_cost_incl: string | null; avg_incl: string | null }[]
+      >(Prisma.sql`
+        WITH received AS (
+          SELECT
+            poi.variant_id,
+            poi.quantity_received,
+            poi.unit_cost_exclusive,
+            CASE WHEN poi.quantity_ordered > 0
+              THEN poi.line_total / poi.quantity_ordered
+              ELSE NULL END AS unit_cost_incl,
+            po.created_at
+          FROM purchase_order_items poi
+          INNER JOIN purchase_orders po ON po.id = poi.purchase_order_id
+          WHERE poi.quantity_received > 0
+            AND poi.variant_id IN (${Prisma.join(variantIds)})
+        ),
+        latest AS (
+          SELECT DISTINCT ON (variant_id)
+            variant_id, unit_cost_exclusive, unit_cost_incl
+          FROM received
+          ORDER BY variant_id, created_at DESC
+        ),
+        averaged AS (
+          -- Weighted the same way as the ex-GST WAC, so the two figures describe
+          -- the same stock rather than two different averages.
+          SELECT
+            variant_id,
+            SUM(quantity_received::numeric * unit_cost_incl)
+              / NULLIF(SUM(quantity_received::numeric), 0) AS avg_incl
+          FROM received
+          WHERE unit_cost_incl IS NOT NULL
+          GROUP BY variant_id
+        )
+        SELECT
+          l.variant_id,
+          l.unit_cost_exclusive::text AS unit_cost,
+          l.unit_cost_incl::text      AS unit_cost_incl,
+          a.avg_incl::text            AS avg_incl
+        FROM latest l
+        LEFT JOIN averaged a ON a.variant_id = l.variant_id
       `)
     : [];
   const lastCostMap = new Map(lastCostRows.map((r) => [r.variant_id, r.unit_cost]));
+  const lastCostInclMap = new Map(
+    lastCostRows.filter((r) => r.unit_cost_incl != null).map((r) => [r.variant_id, r.unit_cost_incl!]),
+  );
+  const avgCostInclMap = new Map(
+    lastCostRows.filter((r) => r.avg_incl != null).map((r) => [r.variant_id, r.avg_incl!]),
+  );
 
   const withCosts = items.map((p) => ({
     ...p,
@@ -1169,6 +1212,13 @@ export async function searchPosCatalog(query: Record<string, unknown>) {
       /** Rate paid on the most recent receive; null when never purchased. */
       lastCost: lastCostMap.has(v.id)
         ? new Prisma.Decimal(lastCostMap.get(v.id)!).toFixed(2)
+        : null,
+      /** Same two figures with the purchase GST added back — display only. */
+      unitCostIncl: avgCostInclMap.has(v.id)
+        ? new Prisma.Decimal(avgCostInclMap.get(v.id)!).toFixed(2)
+        : null,
+      lastCostIncl: lastCostInclMap.has(v.id)
+        ? new Prisma.Decimal(lastCostInclMap.get(v.id)!).toFixed(2)
         : null,
     })),
   }));

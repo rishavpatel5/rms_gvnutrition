@@ -168,7 +168,7 @@ export function PurchasesPage() {
     if (!authed) return;
     setLoading(true);
     try {
-      const { data } = await apiGetJsonAuthedWithMeta<Supplier[]>("/api/v1/suppliers?limit=200");
+      const { data } = await apiGetJsonAuthedWithMeta<Supplier[]>("/api/v1/suppliers?limit=200&isActive=true");
       setSuppliers(data);
       setSupplierId((prev) => prev || data[0]?.id || "");
     } finally {

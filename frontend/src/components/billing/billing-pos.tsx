@@ -81,6 +81,9 @@ type PosVariant = {
   unitCost?: string | number;
   /** Rate paid on the most recent receive; null if never purchased. */
   lastCost?: string | number | null;
+  /** The same two costs with the purchase GST added back — display only. */
+  unitCostIncl?: string | number | null;
+  lastCostIncl?: string | number | null;
   /** On the variant — often the only thing separating two identical packs. */
   brand: { id: string; name: string } | null;
   flavour: { name: string } | null;
@@ -560,6 +563,16 @@ export function BillingPos() {
                           wac={asMoneyNumber(variant.unitCost ?? 0)}
                           lastCost={
                             variant.lastCost == null ? null : asMoneyNumber(variant.lastCost)
+                          }
+                          wacIncl={
+                            variant.unitCostIncl == null
+                              ? null
+                              : asMoneyNumber(variant.unitCostIncl)
+                          }
+                          lastCostIncl={
+                            variant.lastCostIncl == null
+                              ? null
+                              : asMoneyNumber(variant.lastCostIncl)
                           }
                         />
                       </p>
