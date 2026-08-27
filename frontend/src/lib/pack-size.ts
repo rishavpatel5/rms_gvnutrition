@@ -37,6 +37,9 @@ const COUNT_UNITS: Record<string, string> = {
   tab: "tabs", tabs: "tabs", tablet: "tabs", tablets: "tabs",
   cap: "caps", caps: "caps", capsule: "caps", capsules: "caps",
   softgel: "caps", softgels: "caps",
+  // "SER" is how the owner writes servings on the import sheet; the long forms
+  // resolve to the same row so a mixed sheet does not create near-duplicates.
+  ser: "servings", sers: "servings", serv: "servings", servs: "servings",
   serving: "servings", servings: "servings", scoop: "scoops", scoops: "scoops",
   count: "", n: "",
 };
@@ -106,13 +109,13 @@ export function measureHint(measure: PackMeasure): string {
   if (measure === "WEIGHT") return "Powders — whey, gainer, creatine, oats";
   if (measure === "VOLUME") return "Liquid supplements";
   if (measure === "SACHET") return "Single-serve packets in a box";
-  return "Tablets and capsules";
+  return "Tablets, capsules and servings";
 }
 
 /** Starting suggestions per measure. Staff can always type something else. */
 export const PACK_PRESETS: Record<PackMeasure, string[]> = {
   WEIGHT: ["250g", "400g", "500g", "1kg", "2kg", "3kg", "5kg"],
   VOLUME: ["250ml", "500ml", "1L"],
-  COUNT: ["30 tabs", "60 tabs", "90 tabs", "120 tabs"],
+  COUNT: ["30 tabs", "60 tabs", "90 tabs", "120 tabs", "30 servings", "60 servings"],
   SACHET: ["10 pcs", "15 pcs", "20 pcs", "30 pcs"],
 };

@@ -50,6 +50,9 @@ const COUNT_UNITS: Record<string, string> = {
   tab: "tabs", tabs: "tabs", tablet: "tabs", tablets: "tabs",
   cap: "caps", caps: "caps", capsule: "caps", capsules: "caps",
   softgel: "caps", softgels: "caps",
+  // "SER" is how the owner writes servings on the import sheet; the long forms
+  // resolve to the same row so a mixed sheet does not create near-duplicates.
+  ser: "servings", sers: "servings", serv: "servings", servs: "servings",
   serving: "servings", servings: "servings", scoop: "scoops", scoops: "scoops",
   count: "", n: "",
 };

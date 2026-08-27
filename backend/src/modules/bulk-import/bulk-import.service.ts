@@ -331,7 +331,8 @@ export async function scanImportFile(buffer: Buffer): Promise<ScanResult> {
     if (pack_size && !parsePackSizeLabel(pack_size)) {
       errors.push(
         `Pack size "${pack_size}" not understood. Use a number with a unit, ` +
-          `e.g. 1kg, 500g, 500ml, 1L, or a plain count like 60 for tablets`,
+          `e.g. 1kg, 500g, 500ml, 1L, 60 tabs, 30 ser (servings), 30 pcs (sachets), ` +
+          `or a plain count like 60`,
       );
     }
 
