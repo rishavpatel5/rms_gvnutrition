@@ -726,8 +726,14 @@ export function BulkImportPage() {
                         Not now
                       </Button>
                     </div>
+                    {/* History lists batches and offers a rollback; it has no
+                        "receive" control, so pointing there was a dead end. The
+                        real recovery is to upload the same sheet again: the
+                        catalog step is idempotent, so it adds nothing a second
+                        time, and the rows then resolve straight to stock. */}
                     <p className="mt-3 text-xs text-amber-600">
-                      You can also receive this stock later from the History tab.
+                      Not now? Upload the same sheet again later and run both steps — the
+                      catalog step will not duplicate anything it already created.
                     </p>
                   </div>
                 </div>

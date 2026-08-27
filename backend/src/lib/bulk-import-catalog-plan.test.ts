@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildSkuBase,
+  resolveRowRefs,
   claimUnique,
   claimUniqueSku,
   normKey,
@@ -218,4 +219,61 @@ test("generated SKUs stay unique across a whole sheet of look-alike rows", () =>
   const skus = plan.toCreate.map((v) => String(v.sku).toUpperCase());
   assert.equal(skus.length, 50);
   assert.equal(new Set(skus).size, 50, "every generated SKU must be unique");
+});
+
+// ── The production failure: fuzzy product match vs. sheet text ──────────────
+//
+// The scan matches product names at 85% similarity, so a sheet saying
+// "High Protein Muesli" is deliberately attached to the catalog's existing
+// "HIGH PROTEIN MUESLIE". Step 1 created the variant under that product; step 2
+// rebuilt the key from the sheet text, never found it, and reported a SKU it had
+// just created as "not in the catalog yet".
+
+test("a scan-supplied productId beats the sheet's own spelling", () => {
+  const r = refs({ productByName: new Map([["high protein mueslie", "prod_real"]]) });
+  const out = resolveRowRefs(
+    row({ product_name: "High Protein Muesli" }, { productId: "prod_real" }),
+    r,
+  );
+  assert.equal(out.productId, "prod_real");
+});
+
+test("both import steps derive the SAME identity for a fuzzy-matched row", () => {
+  // What the catalog step stored, keyed off the id the scan resolved.
+  const r = refs({ productByName: new Map([["high protein mueslie", "prod_real"]]) });
+  const sheetRow = row(
+    { product_name: "High Protein Muesli", flavour: "Chocolate", pack_size: "1KG" },
+    { productId: "prod_real" },
+  );
+  r.packByCode.set("1KG", S_2KG); // "1KG" canonicalises to code 1KG
+
+  const a = resolveRowRefs(sheetRow, r);
+  const b = resolveRowRefs(sheetRow, r);
+  assert.equal(
+    variantIdentity(a.productId!, a.brandId, a.flavourId, a.packSizeId),
+    variantIdentity(b.productId!, b.brandId, b.flavourId, b.packSizeId),
+  );
+  // And it is the REAL product, not one invented from the sheet spelling.
+  assert.equal(a.productId, "prod_real");
+});
+
+test("pack size resolves through its canonical code, whatever the sheet typed", () => {
+  const r = refs();
+  for (const spelling of ["2kg", "2 KG", "2Kg", "2 kg"]) {
+    const out = resolveRowRefs(row({ pack_size: spelling }, { packSizeId: undefined }), r);
+    assert.equal(out.packSizeId, S_2KG, `"${spelling}" should resolve to the 2kg row`);
+  }
+});
+
+test("a row with no ids at all still resolves by name", () => {
+  const out = resolveRowRefs(row({}, {}), refs());
+  assert.equal(out.productId, P_WHEY);
+  assert.equal(out.brandId, B_TN);
+  assert.equal(out.flavourId, F_CHOC);
+  assert.equal(out.packSizeId, S_2KG);
+});
+
+test("an unknown name resolves to null rather than guessing", () => {
+  const out = resolveRowRefs(row({ product_name: "Nothing Like This" }, {}), refs());
+  assert.equal(out.productId, null);
 });

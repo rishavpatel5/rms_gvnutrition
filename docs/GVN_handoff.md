@@ -624,6 +624,43 @@ the slug; rebuild picks up the new name; re-saving unchanged drifts neither SKU 
 slug; a hand-typed SKU wins; clearing a flavour back to none; and two variants
 collapsing onto one code get "-2" rather than colliding. Fixtures were removed after.
 
+## 11.14 BULK IMPORT STEP 2 — "THESE SKUS ARE NOT IN THE CATALOG YET" (production fix)
+
+Step 1 reported success (1 product, 7 variants created), then step 2 refused two of
+the rows: *"These SKUs are not in the catalog yet — create the catalog first: High
+Protein Muesli · PINTOLA · Dark Choco · 1KG, ..."*. It had just created them.
+
+**Cause: the two steps identified a row differently.** The scan FUZZY-matches product
+names at 85% similarity, so a sheet saying `High Protein Muesli` is deliberately
+attached to the catalog's existing `HIGH PROTEIN MUESLIE` (trailing E) and the row
+arrives carrying that product's ID. Step 1 correctly created the variant under it.
+Step 2 then rebuilt the row's identity from the RAW SHEET TEXT —
+`high protein muesli||pintola||dark choco||1kg` — which never matches the stored
+`high protein mueslie||...`. Any row the scan resolved to a differently-spelled
+existing row hit this: it is not limited to product names.
+
+**Fix: one resolver, used by both steps.** `resolveRowRefs()` in
+`bulk-import-catalog-plan.ts` turns a sheet row into the four reference IDs, with the
+ids the scan already resolved always winning over a name lookup. Step 1 and step 2 now
+call it, and step 2 keys its variant map on `variantIdentity()` (IDs) instead of text.
+The two agree by construction rather than by both happening to normalise the same way.
+Text matching is kept only as a last resort for rows that carry no ids at all.
+
+Regression tests cover the exact failure (a scan-supplied productId beating the
+sheet's own spelling; both steps deriving the same identity for a fuzzy-matched row)
+plus pack-size spelling drift and unknown names. Reproduced end-to-end against the dev
+DB first — catalog product `ZZREPRO HIGH PROTEIN MUESLIE`, sheet row
+`ZZREPRO High Protein Muesli` — and confirmed 10 units land across 2 POs.
+
+**Recovering the stuck production batch:** upload the same sheet again and run both
+steps. The catalog step is idempotent (§11.9), so it re-creates nothing; the rows then
+resolve to the variants that already exist and the stock goes in.
+
+**Also corrected:** the step-2 panel said *"You can also receive this stock later from
+the History tab."* History lists batches and offers a rollback — it has NO receive
+control, so that was a dead end for anyone who clicked "Not now". It now describes the
+re-upload path instead.
+
 ## 12. PENDING FROM OWNER
   - GV Nutrition logo PNG (placeholder used until then).
   - `STORE_GSTIN` (placeholder used until then).

@@ -152,6 +152,45 @@ export type CatalogPlan = {
   unresolved: number[];
 };
 
+/** The reference rows a sheet row points at, as IDs. */
+export type RowRefs = {
+  productId: string | null;
+  brandId: string | null;
+  flavourId: string | null;
+  packSizeId: string | null;
+};
+
+/**
+ * Turn one sheet row into the IDs it refers to.
+ *
+ * SHARED BY BOTH IMPORT STEPS ON PURPOSE. The scan resolves names loosely — the
+ * product name is FUZZY-matched at 85%, so a sheet saying "High Protein Muesli"
+ * legitimately attaches to a catalog product spelled "HIGH PROTEIN MUESLIE" — and
+ * pack sizes are canonicalised ("1KG" -> "1kg"). Any step that re-derives identity
+ * from the raw sheet text instead of these ids will disagree with the step that
+ * created the variant, and report a SKU it just made as "not in the catalog".
+ * The ids the scan already resolved therefore always win over a name lookup.
+ */
+export function resolveRowRefs(
+  row: PlanRow,
+  refs: Pick<CatalogRefs, "flavourByName" | "packByCode" | "brandByName" | "productByName">,
+): RowRefs {
+  const r = row.raw;
+  return {
+    productId: row.productId ?? refs.productByName.get(normKey(r.product_name)) ?? null,
+    brandId:
+      row.brandId ?? (r.brand?.trim() ? refs.brandByName.get(normKey(r.brand)) ?? null : null),
+    flavourId:
+      row.flavourId ??
+      (r.flavour?.trim() ? refs.flavourByName.get(normKey(r.flavour)) ?? null : null),
+    packSizeId:
+      row.packSizeId ??
+      (r.pack_size?.trim()
+        ? refs.packByCode.get(parsePackSizeLabel(r.pack_size)?.code ?? "") ?? null
+        : null),
+  };
+}
+
 export function planVariantWrites(rows: PlanRow[], refs: CatalogRefs): CatalogPlan {
   const toCreate: Prisma.ProductVariantCreateManyInput[] = [];
   const toUpdate: VariantMasterPatch[] = [];
@@ -161,16 +200,7 @@ export function planVariantWrites(rows: PlanRow[], refs: CatalogRefs): CatalogPl
   for (const row of rows) {
     const r = row.raw;
 
-    const flavourId =
-      row.flavourId ?? (r.flavour?.trim() ? refs.flavourByName.get(normKey(r.flavour)) ?? null : null);
-    const packSizeId =
-      row.packSizeId ??
-      (r.pack_size?.trim()
-        ? refs.packByCode.get(parsePackSizeLabel(r.pack_size)?.code ?? "") ?? null
-        : null);
-    const brandId =
-      row.brandId ?? (r.brand?.trim() ? refs.brandByName.get(normKey(r.brand)) ?? null : null);
-    const productId = row.productId ?? refs.productByName.get(normKey(r.product_name)) ?? null;
+    const { productId, brandId, flavourId, packSizeId } = resolveRowRefs(row, refs);
 
     if (!productId) {
       unresolved.push(row.rowNum);

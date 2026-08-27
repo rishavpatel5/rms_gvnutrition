@@ -8,6 +8,7 @@ import {
   claimUnique,
   normKey,
   planVariantWrites,
+  resolveRowRefs,
   slugify,
   variantIdentity,
 } from "../../lib/bulk-import-catalog-plan.js";
@@ -794,11 +795,40 @@ export async function commitStock(
   // brand-new products carry no variantId at scan time (the variant did not exist
   // yet) and no SKU, so after the catalog step created them there would otherwise
   // be no way to find them and every row would report "not in catalog".
+  //
+  // Matched BY ID, using the very same resolver the catalog step used. Matching on
+  // sheet TEXT was wrong and failed in production: the scan fuzzy-matches product
+  // names at 85%, so a sheet row saying "High Protein Muesli" is deliberately
+  // attached to the existing catalog product "HIGH PROTEIN MUESLIE". Step 1 created
+  // the variant under that product; step 2 then rebuilt the key from the sheet text
+  // and never found it, reporting a SKU it had just created as missing.
+  const [flavourRows, packRows, brandRows, productRows] = await Promise.all([
+    prisma.flavour.findMany({ select: { id: true, name: true } }),
+    prisma.packSize.findMany({ select: { id: true, code: true } }),
+    prisma.brand.findMany({ select: { id: true, name: true } }),
+    prisma.product.findMany({ select: { id: true, name: true } }),
+  ]);
+  const nameRefs = {
+    flavourByName: new Map(flavourRows.map((f) => [normKey(f.name), f.id])),
+    packByCode: new Map(packRows.map((p) => [p.code, p.id])),
+    brandByName: new Map(brandRows.map((b) => [normKey(b.name), b.id])),
+    productByName: new Map<string, string>(),
+  };
+  for (const pr of productRows) {
+    if (!nameRefs.productByName.has(normKey(pr.name))) {
+      nameRefs.productByName.set(normKey(pr.name), pr.id);
+    }
+  }
+
   // Read fresh — the catalog step ran between the scan and now.
   const freshVariants = await prisma.productVariant.findMany({
     where: { isActive: true },
     select: {
       id: true,
+      productId: true,
+      brandId: true,
+      flavourId: true,
+      packSizeId: true,
       product: { select: { name: true } },
       brand: { select: { name: true } },
       flavour: { select: { name: true } },
@@ -806,8 +836,11 @@ export async function commitStock(
     },
   });
   const identityToId = new Map<string, string>();
+  const textIdentityToId = new Map<string, string>();
   for (const v of freshVariants) {
-    identityToId.set(
+    identityToId.set(variantIdentity(v.productId, v.brandId, v.flavourId, v.packSizeId), v.id);
+    // Kept as a last resort for rows the scan left without ids at all.
+    textIdentityToId.set(
       [v.product.name, v.brand?.name ?? "", v.flavour?.name ?? "", v.packSize?.label ?? ""]
         .map((x) => x.trim().toLowerCase())
         .join("||"),
@@ -815,7 +848,7 @@ export async function commitStock(
     );
   }
   /** Sheet text -> stored identity. Pack size must be canonicalised ("500 g" -> "500g"). */
-  const rowIdentity = (r: CommitRow["raw"]): string => {
+  const rowTextIdentity = (r: CommitRow["raw"]): string => {
     const pack = r.pack_size ? (parsePackSizeLabel(r.pack_size)?.label ?? r.pack_size) : "";
     return [r.product_name, r.brand, r.flavour, pack]
       .map((x) => (x ?? "").trim().toLowerCase())
@@ -828,10 +861,16 @@ export async function commitStock(
     // Resolution order: the id the scan already found, then the CASE-INSENSITIVE
     // SKU map for sheets that supply codes, then identity for blank-SKU rows whose
     // variant was only created moments ago by the catalog step.
+    const refs = resolveRowRefs(row, nameRefs);
     const variantId =
       row.variantId ??
       (row.raw.sku.trim() ? skuToId.get(row.raw.sku.trim().toLowerCase()) : undefined) ??
-      identityToId.get(rowIdentity(row.raw));
+      (refs.productId
+        ? identityToId.get(
+            variantIdentity(refs.productId, refs.brandId, refs.flavourId, refs.packSizeId),
+          )
+        : undefined) ??
+      textIdentityToId.get(rowTextIdentity(row.raw));
     if (!variantId) {
       missing.push(
         row.raw.sku.trim() ||
