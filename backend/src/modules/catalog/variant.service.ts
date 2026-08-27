@@ -123,6 +123,8 @@ async function generateUniqueSku(
   brandId?: string | null,
   flavourId?: string | null,
   packSizeId?: string | null,
+  /** Variant being renamed — its own current SKU must not count as a collision. */
+  selfId?: string,
 ): Promise<string> {
   const [brand, flavour, packSize] = await Promise.all([
     brandId ? prisma.brand.findUnique({ where: { id: brandId }, select: { name: true } }) : null,
@@ -145,7 +147,7 @@ async function generateUniqueSku(
       where: { sku: candidate },
       select: { id: true },
     });
-    if (!clash) return candidate;
+    if (!clash || clash.id === selfId) return candidate;
     candidate = `${base}-${n}`;
   }
   throw new AppError(409, "SKU_GENERATION_FAILED", "Could not generate a unique SKU");
@@ -266,6 +268,12 @@ export async function updateVariant(
     flavourId?: string | null;
     packSizeId?: string | null;
     isActive?: boolean;
+    /**
+     * Rebuild the SKU from the attributes this update leaves behind. The code is
+     * BRAND-PRODUCT-FLAVOUR-PACKSIZE, so changing a variant's flavour without this
+     * leaves a SKU describing the old one. Ignored when an explicit `sku` is given.
+     */
+    regenerateSku?: boolean;
   },
 ) {
   if (input.brandId) {
@@ -280,11 +288,51 @@ export async function updateVariant(
     const p = await prisma.packSize.findUnique({ where: { id: input.packSizeId } });
     if (!p) throw new AppError(404, "PACK_SIZE_NOT_FOUND", "Pack size not found");
   }
+  // Resolve the SKU BEFORE the write: it depends on the attribute values this
+  // update is about to leave in place, which means reading the variant as it is
+  // now and overlaying whatever the caller sent.
+  let regenerated: string | undefined;
+  if (input.regenerateSku && input.sku === undefined) {
+    const current = await prisma.productVariant.findUnique({
+      where: { id },
+      select: {
+        brandId: true,
+        flavourId: true,
+        packSizeId: true,
+        product: { select: { slug: true } },
+      },
+    });
+    if (!current) throw new AppError(404, "VARIANT_NOT_FOUND", "Variant not found");
+    regenerated = await generateUniqueSku(
+      current.product.slug,
+      input.brandId !== undefined ? input.brandId : current.brandId,
+      input.flavourId !== undefined ? input.flavourId : current.flavourId,
+      input.packSizeId !== undefined ? input.packSizeId : current.packSizeId,
+      id,
+    );
+    // An inactive variant squatting on the freshly built code would block the
+    // update, exactly as it would on create. Move it aside.
+    const squatter = await prisma.productVariant.findUnique({
+      where: { sku: regenerated },
+      select: { id: true, isActive: true },
+    });
+    if (squatter && squatter.id !== id && !squatter.isActive) {
+      await prisma.productVariant.update({
+        where: { id: squatter.id },
+        data: { sku: `${regenerated}__deleted_${squatter.id.slice(-8)}` },
+      });
+    }
+  }
+
   try {
     return await prisma.productVariant.update({
       where: { id },
       data: {
-        ...(input.sku !== undefined ? { sku: input.sku.trim() } : {}),
+        ...(input.sku !== undefined
+          ? { sku: input.sku.trim() }
+          : regenerated
+            ? { sku: regenerated }
+            : {}),
         ...(input.listPrice !== undefined
           ? { listPrice: new Prisma.Decimal(input.listPrice) }
           : {}),

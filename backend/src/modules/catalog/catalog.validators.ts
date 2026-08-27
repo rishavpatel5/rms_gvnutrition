@@ -59,6 +59,8 @@ export const updateVariantBodySchema = z.object({
   flavourId: z.string().cuid().optional().nullable(),
   packSizeId: z.string().cuid().optional().nullable(),
   isActive: z.boolean().optional(),
+  /** Rebuild BRAND-PRODUCT-FLAVOUR-PACKSIZE from the post-update attributes. */
+  regenerateSku: z.boolean().optional(),
 });
 
 export const createFlavourBodySchema = z.object({

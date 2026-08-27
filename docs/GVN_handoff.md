@@ -586,6 +586,44 @@ That matching has to live in the script because `suppliers.name` carries only an
 ordinary index, not a unique one, so the database will happily take the same company
 twice. Spellings are stored exactly as the owner gave them.
 
+## 11.13 EDIT A PRODUCT AFTER CREATION — BUILT (owner-requested)
+
+Only the SKU code was editable once a product existed. A detail missed at creation —
+a flavour never entered, a weight left blank, a misspelt name — could not be fixed.
+
+The SKU dialog now edits everything:
+
+  - **Product details:** name, type, HSN code.
+  - **Per SKU:** brand, flavour, pack size / weight, MRP, low-stock alert, SKU.
+  - Flavours, brands and pack sizes can be created inline from those dropdowns
+    ("+ Add a flavour..."), so a value that never existed is no obstacle. Pack sizes
+    are PARSED, not taken literally, so "500 G" lands on the same row as "500g" and
+    the measure is inferred instead of being asked for.
+
+Everything is a foreign key on the variant, so a change propagates by itself —
+billing, live stock, purchase and every report read through the same relation. Only
+the SKU is copied text, and nothing else stores it (verified: `sku` appears exactly
+once in schema.prisma), so renaming one disturbs no history.
+
+**SKU regeneration.** The code is BRAND-PRODUCT-FLAVOUR-PACKSIZE, so changing an
+attribute without rebuilding it leaves a code describing the old one. `updateVariant`
+takes `regenerateSku`, and the UI sends it whenever the code has not been typed by
+hand — type in the box and it is kept verbatim instead, with a link back to
+automatic. `generateUniqueSku` now takes a `selfId` so a variant's own current code
+does not count as a collision, which would otherwise push every re-save to "-2".
+
+**Renaming re-slugs.** `generateUniqueSku` builds codes from `product.slug`, so a
+rename that left the slug behind would keep minting SKUs spelling the old name.
+`updateProduct` now derives a fresh unique slug when the name actually changes and no
+slug was passed explicitly. After a rename the dialog offers "Rebuild SKUs" rather
+than silently rewriting codes the owner may have chosen deliberately.
+
+Verified against the dev DB across 11 paths: filling in a flavour and a pack size
+that were never set; swapping a flavour (old one gone from the code); rename moves
+the slug; rebuild picks up the new name; re-saving unchanged drifts neither SKU nor
+slug; a hand-typed SKU wins; clearing a flavour back to none; and two variants
+collapsing onto one code get "-2" rather than colliding. Fixtures were removed after.
+
 ## 12. PENDING FROM OWNER
   - GV Nutrition logo PNG (placeholder used until then).
   - `STORE_GSTIN` (placeholder used until then).

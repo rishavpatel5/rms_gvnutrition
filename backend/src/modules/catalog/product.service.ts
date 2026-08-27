@@ -124,6 +124,25 @@ export async function createProduct(input: {
   }
 }
 
+/**
+ * A free product slug based on `base`, appending -2, -3 ... past anything taken.
+ * `selfId` is skipped so a product keeps its own slug when the name is unchanged
+ * in substance (e.g. re-cased), instead of drifting to "-2" on every save.
+ */
+async function uniqueProductSlug(base: string, selfId?: string): Promise<string> {
+  const root = base || "product";
+  let candidate = root;
+  for (let n = 2; n < 1000; n++) {
+    const clash = await prisma.product.findUnique({
+      where: { slug: candidate },
+      select: { id: true },
+    });
+    if (!clash || clash.id === selfId) return candidate;
+    candidate = `${root}-${n}`;
+  }
+  throw new AppError(409, "SLUG_GENERATION_FAILED", "Could not generate a unique slug");
+}
+
 export async function updateProduct(
   id: string,
   input: {
@@ -137,12 +156,30 @@ export async function updateProduct(
   if (input.slug !== undefined && !isValidSlug(input.slug)) {
     throw new AppError(400, "INVALID_SLUG", "Invalid slug format");
   }
+
+  // Renaming has to move the slug with it. generateUniqueSku() builds variant codes
+  // from product.slug, so a product renamed "Blood Lock" -> "Blood Lock Pro" would
+  // otherwise keep minting SKUs that still say BLOOD-LOCK. Only derived when the
+  // caller did not set a slug explicitly, and only when the name actually changed.
+  let derivedSlug: string | undefined;
+  if (input.name !== undefined && input.slug === undefined) {
+    const current = await prisma.product.findUnique({
+      where: { id },
+      select: { name: true, slug: true },
+    });
+    if (current && current.name.trim() !== input.name.trim()) {
+      derivedSlug = await uniqueProductSlug(slugify(input.name), id);
+    }
+  }
+
   try {
     const data: Prisma.ProductUncheckedUpdateInput = {
       ...(input.name !== undefined ? { name: input.name.trim() } : {}),
       ...(input.slug !== undefined
         ? { slug: input.slug.trim().toLowerCase() }
-        : {}),
+        : derivedSlug
+          ? { slug: derivedSlug }
+          : {}),
       ...(input.kind !== undefined ? { kind: input.kind } : {}),
       ...(input.hsnCode !== undefined
         ? { hsnCode: input.hsnCode?.trim() || null }

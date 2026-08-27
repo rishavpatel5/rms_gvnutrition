@@ -1,6 +1,6 @@
 import { ChevronLeft, ChevronRight, Loader2, PackagePlus, Palette, Pencil, Plus, Rows3, Ruler, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { BrandTag } from "@/components/catalog/brand-tag";
 import { FlavourLabel } from "@/components/catalog/flavour-label";
@@ -108,6 +108,8 @@ type CatalogProductRow = {
   id: string;
   name: string;
   kind: string;
+  /** Printed on the invoice when filled. Editable from the SKU dialog. */
+  hsnCode?: string | null;
   /** Brands come from the VARIANTS now — one product can span several companies. */
   variants?: { brand: { id: string; name: string; slug: string } | null }[];
   _count?: { variants: number };
@@ -133,38 +135,85 @@ const selectControl =
 type SkuVariant = {
   id: string;
   sku: string;
-  brand: { name: string } | null;
-  flavour: { name: string } | null;
-  packSize: { label: string } | null;
+  listPrice?: string | null;
+  lowStockThreshold?: number | null;
+  brand: { id: string; name: string } | null;
+  flavour: { id: string; name: string } | null;
+  packSize: { id: string; label: string; code: string } | null;
 };
+
+/** What the per-SKU editor is holding before it is saved. */
+type VariantDraft = {
+  brandId: string;
+  flavourId: string;
+  packSizeId: string;
+  sku: string;
+  listPrice: string;
+  lowStockThreshold: string;
+  /** Set once the code is typed by hand; until then it tracks the attributes. */
+  skuTouched: boolean;
+};
+
+/** Which reference list the inline "add new" row is currently creating into. */
+type QuickAdd = "brand" | "flavour" | "packSize" | null;
 
 function ProductSkuDialog({
   product,
   open,
   onClose,
   onProductDeleted,
+  onProductUpdated,
+  flavours,
+  packSizes,
+  brands,
+  onReferenceChanged,
 }: {
   product: CatalogProductRow | null;
   open: boolean;
   onClose: () => void;
   onProductDeleted: (id: string) => void;
+  onProductUpdated: (p: { id: string; name: string; kind: string; hsnCode: string | null }) => void;
+  flavours: Flavour[];
+  packSizes: PackSize[];
+  brands: BrandRef[];
+  onReferenceChanged: () => Promise<void>;
 }) {
   const [variants, setVariants] = useState<SkuVariant[]>([]);
   const [loading, setLoading] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editSku, setEditSku] = useState("");
+  const [draft, setDraft] = useState<VariantDraft | null>(null);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  const editInputRef = useRef<HTMLInputElement>(null);
+
+  // Product-level fields are editable here because the details a shopkeeper
+  // realises are missing — a flavour never filled in, a weight left blank, a
+  // misspelt name — are only ever noticed after the product exists.
+  const [pName, setPName] = useState("");
+  const [pKind, setPKind] = useState<(typeof KINDS)[number]>("SUPPLEMENT");
+  const [pHsn, setPHsn] = useState("");
+  const [savingProduct, setSavingProduct] = useState(false);
+  const [renamedFrom, setRenamedFrom] = useState<string | null>(null);
+  const [resyncing, setResyncing] = useState(false);
+
+  const [quickAdd, setQuickAdd] = useState<QuickAdd>(null);
+  const [quickText, setQuickText] = useState("");
+  const [quickBusy, setQuickBusy] = useState(false);
 
   useEffect(() => {
     if (!open || !product) {
       setVariants([]);
       setEditingId(null);
+      setDraft(null);
       setConfirmDeleteId(null);
+      setQuickAdd(null);
+      setRenamedFrom(null);
       return;
     }
+    setPName(product.name);
+    setPKind((product.kind as (typeof KINDS)[number]) ?? "SUPPLEMENT");
+    setPHsn(product.hsnCode ?? "");
+    setRenamedFrom(null);
     let cancelled = false;
     void (async () => {
       setLoading(true);
@@ -184,29 +233,176 @@ function ProductSkuDialog({
     };
   }, [open, product]);
 
-  useEffect(() => {
-    if (editingId) editInputRef.current?.focus();
-  }, [editingId]);
-
   function startEdit(v: SkuVariant) {
     setEditingId(v.id);
-    setEditSku(v.sku);
     setConfirmDeleteId(null);
+    setQuickAdd(null);
+    setDraft({
+      brandId: v.brand?.id ?? "",
+      flavourId: v.flavour?.id ?? "",
+      packSizeId: v.packSize?.id ?? "",
+      sku: v.sku,
+      listPrice: v.listPrice != null && Number(v.listPrice) > 0 ? String(Number(v.listPrice)) : "",
+      lowStockThreshold: v.lowStockThreshold != null ? String(v.lowStockThreshold) : "",
+      skuTouched: false,
+    });
   }
 
-  async function saveEdit(variantId: string) {
-    const trimmed = editSku.trim();
-    if (!trimmed) return;
+  /**
+   * The code this SKU gets if it is left on auto. Mirrors the server's
+   * generateUniqueSku(); the server stays authoritative and may still append a
+   * numeric suffix, so this is shown as a preview and never sent as the value.
+   */
+  const draftSkuPreview = useMemo(() => {
+    if (!draft || !product) return "";
+    return previewSku(
+      brands.find((b) => b.id === draft.brandId)?.name,
+      pName || product.name,
+      flavours.find((f) => f.id === draft.flavourId)?.name,
+      packSizes.find((s) => s.id === draft.packSizeId)?.code,
+    );
+  }, [draft, product, brands, flavours, packSizes, pName]);
+
+  function patchDraft(patch: Partial<VariantDraft>) {
+    setDraft((d) => (d ? { ...d, ...patch } : d));
+  }
+
+  /** Create a flavour / pack size / brand without leaving the editor. */
+  async function submitQuickAdd() {
+    const text = quickText.trim();
+    if (!text || !quickAdd) return;
+    setQuickBusy(true);
+    try {
+      if (quickAdd === "flavour") {
+        const created = await apiPostJsonAuthed<{ id: string }>(
+          "/api/v1/catalog/reference/flavours",
+          { name: text },
+        );
+        await onReferenceChanged();
+        patchDraft({ flavourId: created.id });
+      } else if (quickAdd === "brand") {
+        const created = await apiPostJsonAuthed<{ id: string }>(
+          "/api/v1/catalog/reference/brands",
+          { name: text },
+        );
+        await onReferenceChanged();
+        patchDraft({ brandId: created.id });
+      } else {
+        // Parsed rather than taken literally, so "500 G" and "500g" land on one
+        // row and the measure is inferred instead of being asked for.
+        const parsed = parsePackSizeLabel(text);
+        if (!parsed) {
+          toast.error(`Could not read "${text}" as a pack size. Try 500g, 1kg, 60 tabs, 30 pcs.`);
+          return;
+        }
+        const existing = packSizes.find((s) => s.code === parsed.code);
+        if (existing) {
+          patchDraft({ packSizeId: existing.id });
+        } else {
+          const created = await apiPostJsonAuthed<{ id: string }>(
+            "/api/v1/catalog/reference/pack-sizes",
+            parsed,
+          );
+          await onReferenceChanged();
+          patchDraft({ packSizeId: created.id });
+        }
+      }
+      setQuickAdd(null);
+      setQuickText("");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not add that");
+    } finally {
+      setQuickBusy(false);
+    }
+  }
+
+  async function saveVariant(variantId: string) {
+    if (!draft) return;
+    const trimmedSku = draft.sku.trim();
+    if (draft.skuTouched && trimmedSku.length < 2) {
+      toast.error("A SKU needs at least 2 characters.");
+      return;
+    }
     setSavingId(variantId);
     try {
-      await apiPatchJsonAuthed(`/api/v1/catalog/variants/${variantId}`, { sku: trimmed });
-      setVariants((prev) => prev.map((v) => (v.id === variantId ? { ...v, sku: trimmed } : v)));
+      const body: Record<string, unknown> = {
+        brandId: draft.brandId || null,
+        flavourId: draft.flavourId || null,
+        packSizeId: draft.packSizeId || null,
+        lowStockThreshold:
+          draft.lowStockThreshold.trim() === ""
+            ? null
+            : Math.max(0, Math.floor(Number(draft.lowStockThreshold) || 0)),
+      };
+      if (draft.listPrice.trim() !== "") body.listPrice = Number(draft.listPrice);
+      // A hand-typed code is sent verbatim; otherwise the server rebuilds it from
+      // the attributes, so changing the flavour cannot leave behind a SKU that
+      // still describes the old one.
+      if (draft.skuTouched) body.sku = trimmedSku;
+      else body.regenerateSku = true;
+
+      const updated = await apiPatchJsonAuthed<SkuVariant>(
+        `/api/v1/catalog/variants/${variantId}`,
+        body,
+      );
+      setVariants((prev) => prev.map((v) => (v.id === variantId ? { ...v, ...updated } : v)));
       setEditingId(null);
-      toast.success("SKU updated");
+      setDraft(null);
+      toast.success("SKU updated", {
+        description: "The change applies everywhere — billing, live stock and reports.",
+      });
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to update SKU");
     } finally {
       setSavingId(null);
+    }
+  }
+
+  async function saveProduct() {
+    if (!product) return;
+    const name = pName.trim();
+    if (!name) {
+      toast.error("Product name is required.");
+      return;
+    }
+    setSavingProduct(true);
+    try {
+      await apiPatchJsonAuthed(`/api/v1/catalog/products/${product.id}`, {
+        name,
+        kind: pKind,
+        hsnCode: pHsn.trim() || null,
+      });
+      const nameChanged = name !== product.name;
+      onProductUpdated({ id: product.id, name, kind: pKind, hsnCode: pHsn.trim() || null });
+      // The SKUs still spell the old name. Offer to bring them across rather than
+      // silently rewriting codes the owner may have set deliberately.
+      setRenamedFrom(nameChanged ? product.name : null);
+      toast.success("Product details updated");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to update product");
+    } finally {
+      setSavingProduct(false);
+    }
+  }
+
+  /** Rebuild every SKU on this product from its current attributes. */
+  async function resyncSkus() {
+    setResyncing(true);
+    try {
+      const updated = await Promise.all(
+        variants.map((v) =>
+          apiPatchJsonAuthed<SkuVariant>(`/api/v1/catalog/variants/${v.id}`, {
+            regenerateSku: true,
+          }),
+        ),
+      );
+      setVariants((prev) => prev.map((v) => updated.find((u) => u.id === v.id) ?? v));
+      setRenamedFrom(null);
+      toast.success(`${updated.length} SKU${updated.length === 1 ? "" : "s"} rebuilt`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not rebuild the SKUs");
+    } finally {
+      setResyncing(false);
     }
   }
 
@@ -256,6 +452,14 @@ function ProductSkuDialog({
     return parts.length > 0 ? parts.join(" · ") : "Default";
   }
 
+  const quickAddLabel =
+    quickAdd === "flavour" ? "flavour" : quickAdd === "brand" ? "brand" : "pack size";
+
+  const productDirty =
+    pName.trim() !== (product?.name ?? "") ||
+    pKind !== product?.kind ||
+    pHsn.trim() !== (product?.hsnCode ?? "");
+
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
       <DialogContent className="flex max-h-[85vh] max-w-lg flex-col">
@@ -263,121 +467,377 @@ function ProductSkuDialog({
           <DialogTitle className="leading-snug">{product?.name ?? ""}</DialogTitle>
         </DialogHeader>
 
-        {loading ? (
-          <div className="flex items-center gap-2 py-8 text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" />
-            Loading SKUs…
-          </div>
-        ) : variants.length === 0 && !loading ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">No variants on this product.</p>
-        ) : (
-          <ul className="min-h-0 flex-1 divide-y divide-border/60 overflow-y-auto rounded-xl border border-border/60">
-            {variants.map((v) => {
-              const isEditing = editingId === v.id;
-              const isDeleting = deletingId === v.id;
-              const isSaving = savingId === v.id;
-              const confirmingDelete = confirmDeleteId === v.id;
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+          <div className="space-y-3 rounded-xl border border-border/60 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Product details
+            </p>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Name</Label>
+              <Input
+                className="h-9"
+                value={pName}
+                onChange={(e) => setPName(e.target.value)}
+                placeholder="Product name"
+              />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label className="text-xs">Type</Label>
+                <select
+                  className="flex h-9 w-full cursor-pointer rounded-lg border border-input bg-background px-2 text-sm"
+                  value={pKind}
+                  onChange={(e) => setPKind(e.target.value as (typeof KINDS)[number])}
+                >
+                  {KINDS.map((k) => (
+                    <option key={k} value={k}>
+                      {kindLabel(k)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">
+                  HSN code
+                  <span className="ml-1 font-normal text-muted-foreground">optional</span>
+                </Label>
+                <Input
+                  className="h-9"
+                  value={pHsn}
+                  onChange={(e) => setPHsn(e.target.value)}
+                  placeholder="e.g. 21061000"
+                />
+              </div>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              className="h-8 rounded-lg"
+              disabled={savingProduct || !pName.trim() || !productDirty}
+              onClick={() => void saveProduct()}
+            >
+              {savingProduct ? <Loader2 className="size-3.5 animate-spin" /> : "Save details"}
+            </Button>
 
-              return (
-                <li key={v.id} className="flex flex-col gap-2 bg-background px-4 py-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <BrandTag brand={v.brand?.name} className="mb-1" />
-                      <FlavourLabel flavour={v.flavour?.name}>
-                        <span className="text-sm font-medium">{variantLabel(v)}</span>
-                      </FlavourLabel>
+            {renamedFrom ? (
+              <div className="space-y-2 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed dark:border-amber-900/50 dark:bg-amber-950/25">
+                <p className="text-muted-foreground">
+                  The SKU codes below still spell{" "}
+                  <span className="font-medium text-foreground">{renamedFrom}</span>. Rebuild them to
+                  match the new name, or leave them — a SKU is only a label, and nothing breaks
+                  either way.
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    className="h-7 rounded-md"
+                    disabled={resyncing}
+                    onClick={() => void resyncSkus()}
+                  >
+                    {resyncing ? <Loader2 className="size-3 animate-spin" /> : "Rebuild SKUs"}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 rounded-md"
+                    onClick={() => setRenamedFrom(null)}
+                  >
+                    Keep as they are
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          {loading ? (
+            <div className="flex items-center gap-2 py-8 text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              Loading SKUs…
+            </div>
+          ) : variants.length === 0 ? (
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              No variants on this product.
+            </p>
+          ) : (
+            <ul className="divide-y divide-border/60 rounded-xl border border-border/60">
+              {variants.map((v) => {
+                const isEditing = editingId === v.id;
+                const isDeleting = deletingId === v.id;
+                const isSaving = savingId === v.id;
+                const confirmingDelete = confirmDeleteId === v.id;
+
+                return (
+                  <li key={v.id} className="flex flex-col gap-2 bg-background px-4 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <BrandTag brand={v.brand?.name} className="mb-1" />
+                        <FlavourLabel flavour={v.flavour?.name}>
+                          <span className="text-sm font-medium">{variantLabel(v)}</span>
+                        </FlavourLabel>
+                      </div>
+                      {!isEditing && !confirmingDelete ? (
+                        <div className="flex shrink-0 gap-1">
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="size-8 text-muted-foreground hover:text-foreground"
+                            aria-label={`Edit ${v.sku}`}
+                            onClick={() => startEdit(v)}
+                          >
+                            <Pencil className="size-3.5" />
+                          </Button>
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="size-8 text-muted-foreground hover:text-destructive"
+                            aria-label={`Delete ${v.sku}`}
+                            onClick={() => {
+                              setConfirmDeleteId(v.id);
+                              setEditingId(null);
+                            }}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        </div>
+                      ) : null}
                     </div>
-                    {!isEditing && !confirmingDelete ? (
-                      <div className="flex shrink-0 gap-1">
+
+                    {isEditing && draft ? (
+                      <div className="space-y-3 rounded-lg border border-border/70 bg-muted/20 p-3">
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">Brand</Label>
+                            <select
+                              className="flex h-9 w-full cursor-pointer rounded-lg border border-input bg-background px-2 text-sm"
+                              value={draft.brandId}
+                              onChange={(e) => {
+                                if (e.target.value === "__new__") {
+                                  setQuickAdd("brand");
+                                  setQuickText("");
+                                } else patchDraft({ brandId: e.target.value });
+                              }}
+                            >
+                              <option value="">— none —</option>
+                              {brands.map((b) => (
+                                <option key={b.id} value={b.id}>
+                                  {b.name}
+                                </option>
+                              ))}
+                              <option value="__new__">+ Add a brand…</option>
+                            </select>
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">Flavour</Label>
+                            <select
+                              className="flex h-9 w-full cursor-pointer rounded-lg border border-input bg-background px-2 text-sm"
+                              value={draft.flavourId}
+                              onChange={(e) => {
+                                if (e.target.value === "__new__") {
+                                  setQuickAdd("flavour");
+                                  setQuickText("");
+                                } else patchDraft({ flavourId: e.target.value });
+                              }}
+                            >
+                              <option value="">— none —</option>
+                              {flavours.map((f) => (
+                                <option key={f.id} value={f.id}>
+                                  {f.name}
+                                </option>
+                              ))}
+                              <option value="__new__">+ Add a flavour…</option>
+                            </select>
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">Pack size / weight</Label>
+                            <select
+                              className="flex h-9 w-full cursor-pointer rounded-lg border border-input bg-background px-2 text-sm"
+                              value={draft.packSizeId}
+                              onChange={(e) => {
+                                if (e.target.value === "__new__") {
+                                  setQuickAdd("packSize");
+                                  setQuickText("");
+                                } else patchDraft({ packSizeId: e.target.value });
+                              }}
+                            >
+                              <option value="">— none —</option>
+                              {packSizes.map((s) => (
+                                <option key={s.id} value={s.id}>
+                                  {s.label}
+                                </option>
+                              ))}
+                              <option value="__new__">+ Add a pack size…</option>
+                            </select>
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">MRP</Label>
+                            <Input
+                              className="h-9 tabular-nums"
+                              type="number"
+                              min={0}
+                              step={0.01}
+                              placeholder="0.00"
+                              value={draft.listPrice}
+                              onChange={(e) => patchDraft({ listPrice: e.target.value })}
+                            />
+                          </div>
+                        </div>
+
+                        {quickAdd ? (
+                          <div className="space-y-1.5 rounded-lg border border-dashed border-border px-3 py-2">
+                            <Label className="text-xs">New {quickAddLabel}</Label>
+                            <div className="flex items-center gap-2">
+                              <Input
+                                autoFocus
+                                className="h-8 text-sm"
+                                value={quickText}
+                                placeholder={
+                                  quickAdd === "packSize" ? "e.g. 500g, 1kg, 60 tabs" : "Name"
+                                }
+                                onChange={(e) => setQuickText(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    void submitQuickAdd();
+                                  }
+                                  if (e.key === "Escape") setQuickAdd(null);
+                                }}
+                              />
+                              <Button
+                                type="button"
+                                size="sm"
+                                className="h-8 shrink-0 rounded-lg"
+                                disabled={quickBusy || !quickText.trim()}
+                                onClick={() => void submitQuickAdd()}
+                              >
+                                {quickBusy ? <Loader2 className="size-3.5 animate-spin" /> : "Add"}
+                              </Button>
+                              <Button
+                                type="button"
+                                size="icon"
+                                variant="ghost"
+                                className="size-8 shrink-0"
+                                onClick={() => setQuickAdd(null)}
+                              >
+                                <X className="size-3.5" />
+                              </Button>
+                            </div>
+                          </div>
+                        ) : null}
+
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">
+                              Low stock alert
+                              <span className="ml-1 font-normal text-muted-foreground">
+                                optional
+                              </span>
+                            </Label>
+                            <Input
+                              className="h-9 tabular-nums"
+                              type="number"
+                              min={0}
+                              placeholder="—"
+                              value={draft.lowStockThreshold}
+                              onChange={(e) => patchDraft({ lowStockThreshold: e.target.value })}
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">
+                              SKU
+                              <span className="ml-1 font-normal text-muted-foreground">
+                                {draft.skuTouched ? "typed by hand" : "automatic"}
+                              </span>
+                            </Label>
+                            <Input
+                              className="h-9 font-mono text-xs"
+                              value={draft.skuTouched ? draft.sku : draftSkuPreview}
+                              onChange={(e) => patchDraft({ sku: e.target.value, skuTouched: true })}
+                            />
+                          </div>
+                        </div>
+
+                        <p className="text-[11px] leading-relaxed text-muted-foreground">
+                          {draft.skuTouched ? (
+                            <>
+                              This code will be saved exactly as typed.{" "}
+                              <button
+                                type="button"
+                                className="underline underline-offset-2 hover:text-foreground"
+                                onClick={() => patchDraft({ skuTouched: false })}
+                              >
+                                Go back to automatic
+                              </button>
+                              .
+                            </>
+                          ) : (
+                            "The code follows the brand, flavour and pack size, so it stays correct when you change them. Type in the box to set it yourself."
+                          )}
+                        </p>
+
+                        <div className="flex items-center gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            className="h-8 rounded-lg"
+                            disabled={isSaving}
+                            onClick={() => void saveVariant(v.id)}
+                          >
+                            {isSaving ? <Loader2 className="size-3.5 animate-spin" /> : "Save"}
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-8 rounded-lg"
+                            onClick={() => {
+                              setEditingId(null);
+                              setDraft(null);
+                              setQuickAdd(null);
+                            }}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="font-mono text-xs text-muted-foreground">{v.sku}</p>
+                    )}
+
+                    {confirmingDelete ? (
+                      <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
+                        <span className="flex-1 text-destructive">Delete this SKU?</span>
                         <Button
                           type="button"
-                          size="icon"
-                          variant="ghost"
-                          className="size-8 text-muted-foreground hover:text-foreground"
-                          onClick={() => startEdit(v)}
+                          size="sm"
+                          variant="destructive"
+                          className="h-7 rounded-md"
+                          disabled={isDeleting}
+                          onClick={() => void handleDeleteVariant(v.id)}
                         >
-                          <Pencil className="size-3.5" />
+                          {isDeleting ? <Loader2 className="size-3 animate-spin" /> : "Delete"}
                         </Button>
                         <Button
                           type="button"
-                          size="icon"
+                          size="sm"
                           variant="ghost"
-                          className="size-8 text-muted-foreground hover:text-destructive"
-                          onClick={() => {
-                            setConfirmDeleteId(v.id);
-                            setEditingId(null);
-                          }}
+                          className="h-7 rounded-md"
+                          onClick={() => setConfirmDeleteId(null)}
                         >
-                          <Trash2 className="size-3.5" />
+                          Cancel
                         </Button>
                       </div>
                     ) : null}
-                  </div>
-
-                  {isEditing ? (
-                    <div className="flex items-center gap-2">
-                      <Input
-                        ref={editInputRef}
-                        className="h-8 font-mono text-xs"
-                        value={editSku}
-                        onChange={(e) => setEditSku(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") void saveEdit(v.id);
-                          if (e.key === "Escape") setEditingId(null);
-                        }}
-                      />
-                      <Button
-                        type="button"
-                        size="sm"
-                        className="h-8 shrink-0 rounded-lg"
-                        disabled={isSaving || !editSku.trim()}
-                        onClick={() => void saveEdit(v.id)}
-                      >
-                        {isSaving ? <Loader2 className="size-3.5 animate-spin" /> : "Save"}
-                      </Button>
-                      <Button
-                        type="button"
-                        size="icon"
-                        variant="ghost"
-                        className="size-8 shrink-0"
-                        onClick={() => setEditingId(null)}
-                      >
-                        <X className="size-3.5" />
-                      </Button>
-                    </div>
-                  ) : (
-                    <p className="font-mono text-xs text-muted-foreground">{v.sku}</p>
-                  )}
-
-                  {confirmingDelete ? (
-                    <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
-                      <span className="flex-1 text-destructive">Delete this SKU?</span>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="destructive"
-                        className="h-7 rounded-md"
-                        disabled={isDeleting}
-                        onClick={() => void handleDeleteVariant(v.id)}
-                      >
-                        {isDeleting ? <Loader2 className="size-3 animate-spin" /> : "Delete"}
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 rounded-md"
-                        onClick={() => setConfirmDeleteId(null)}
-                      >
-                        Cancel
-                      </Button>
-                    </div>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
-        )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
 
         <p className="text-xs text-muted-foreground">
           {variants.length} SKU{variants.length === 1 ? "" : "s"} · Deleting all SKUs will remove this
@@ -563,6 +1023,22 @@ export function CatalogPage() {
   useEffect(() => {
     void loadRef();
   }, [loadRef]);
+
+  /**
+   * Re-pull the reference lists after something is created inline. Deliberately not
+   * loadRef(): that flips `loadingRef`, which gates the browse effect and would
+   * refetch the entire catalog every time a flavour is added from a dialog.
+   */
+  const refreshReference = useCallback(async () => {
+    const [fl, ps, br] = await Promise.all([
+      apiGetJsonAuthedWithMeta<Flavour[]>("/api/v1/catalog/reference/flavours?limit=200"),
+      apiGetJsonAuthedWithMeta<PackSize[]>("/api/v1/catalog/reference/pack-sizes?limit=200"),
+      apiGetJsonAuthedWithMeta<BrandRef[]>("/api/v1/catalog/reference/brands?limit=200"),
+    ]);
+    setColors(fl.data);
+    setSizes(ps.data);
+    setBrandOptions(br.data);
+  }, []);
 
   useEffect(() => {
     if (view !== "browse" || loadingRef) return;
@@ -935,6 +1411,24 @@ export function CatalogPage() {
         onProductDeleted={(id) =>
           setCatalogRows((prev) => prev.filter((p) => p.id !== id))
         }
+        onProductUpdated={(p) => {
+          setCatalogRows((prev) =>
+            prev.map((row) =>
+              row.id === p.id ? { ...row, name: p.name, kind: p.kind, hsnCode: p.hsnCode } : row,
+            ),
+          );
+          // Keep the dialog's own header and dirty-check in step with what was saved,
+          // or the Save button stays enabled and a rename looks like it did not take.
+          setSkuDialogProduct((cur) =>
+            cur && cur.id === p.id
+              ? { ...cur, name: p.name, kind: p.kind, hsnCode: p.hsnCode }
+              : cur,
+          );
+        }}
+        flavours={colors}
+        packSizes={sizes}
+        brands={brandOptions}
+        onReferenceChanged={refreshReference}
       />
 
       {view === "browse" ? (
