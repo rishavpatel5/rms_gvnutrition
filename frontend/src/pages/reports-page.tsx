@@ -27,6 +27,9 @@ import {
 } from "@/components/ui/table";
 import { getStoredAccessToken } from "@/lib/api-client";
 import { OrdersReportPanel } from "@/components/reports/orders-report-panel";
+import { GstReportPanel } from "@/components/reports/gst-report-panel";
+import { DateRangePicker } from "@/components/ui/date-range-picker";
+import { getAccountingPresets } from "@/lib/date-presets";
 import {
   fetchCustomerRetention,
   fetchDeadStock,
@@ -82,10 +85,6 @@ export function ReportsPage() {
   const [exportBusy, setExportBusy] = useState(false);
   const [exportErr, setExportErr] = useState<string | null>(null);
 
-  const applyRange = () => {
-    setApplied({ from, to });
-  };
-
   const handleDownloadAll = async () => {
     setExportBusy(true);
     setExportErr(null);
@@ -127,48 +126,68 @@ export function ReportsPage() {
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Date range (IST)</CardTitle>
           <CardDescription>
-            Applies to sales, profit, velocity, retention, offers, and the order ledger. Download exports
-            all tabs plus low stock into one Excel file with a sheet per section.
+            Applies to all analytical ledgers, GST reconciliation, and report tabs. Download exports all
+            tabs into one formatted Excel file with a sheet per section.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex flex-wrap items-end gap-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="rep-from">From</Label>
-              <Input
-                id="rep-from"
-                type="date"
-                value={from}
-                onChange={(e) => setFrom(e.target.value)}
-                className="w-[160px]"
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex flex-wrap items-center gap-3">
+              <DateRangePicker
+                value={{ from, to }}
+                onChange={(range) => {
+                  setFrom(range.from);
+                  setTo(range.to);
+                  setApplied(range);
+                }}
               />
+              <div className="flex flex-wrap items-center gap-1.5">
+                {["This Month", "Last Month", "Last 30 Days", "Current FY"].map((label) => {
+                  const presets = getAccountingPresets();
+                  const preset = presets.find((p) => p.label === label);
+                  if (!preset) return null;
+                  const range = preset.getRange();
+                  const isActive = applied.from === range.from && applied.to === range.to;
+                  return (
+                    <Button
+                      key={label}
+                      type="button"
+                      variant={isActive ? "secondary" : "outline"}
+                      size="sm"
+                      className="h-8 text-xs font-medium"
+                      onClick={() => {
+                        setFrom(range.from);
+                        setTo(range.to);
+                        setApplied(range);
+                      }}
+                    >
+                      {label}
+                    </Button>
+                  );
+                })}
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="rep-to">To</Label>
-              <Input id="rep-to" type="date" value={to} onChange={(e) => setTo(e.target.value)} className="w-[160px]" />
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={exportBusy || !!tokenHint}
+                className="gap-2"
+                onClick={() => void handleDownloadAll()}
+              >
+                {exportBusy ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" />
+                    Preparing download…
+                  </>
+                ) : (
+                  <>
+                    <Download className="size-4" />
+                    Download all tabs (.xlsx)
+                  </>
+                )}
+              </Button>
             </div>
-            <Button type="button" onClick={applyRange}>
-              Apply range
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={exportBusy || !!tokenHint}
-              className="gap-2"
-              onClick={() => void handleDownloadAll()}
-            >
-              {exportBusy ? (
-                <>
-                  <Loader2 className="size-4 animate-spin" />
-                  Preparing download…
-                </>
-              ) : (
-                <>
-                  <Download className="size-4" />
-                  Download all tabs
-                </>
-              )}
-            </Button>
           </div>
           {exportErr ? <p className="text-sm text-destructive">{exportErr}</p> : null}
         </CardContent>
@@ -184,6 +203,7 @@ export function ReportsPage() {
           <TabsTrigger value="retention">Retention</TabsTrigger>
           <TabsTrigger value="offers">Offers</TabsTrigger>
           <TabsTrigger value="orders">Orders</TabsTrigger>
+          <TabsTrigger value="gst">GST</TabsTrigger>
         </TabsList>
 
         <TabsContent value="sales" className="space-y-4">
@@ -209,6 +229,17 @@ export function ReportsPage() {
         </TabsContent>
         <TabsContent value="orders" className="space-y-4">
           <OrdersReportPanel from={applied.from} to={applied.to} />
+        </TabsContent>
+        <TabsContent value="gst" className="space-y-4">
+          <GstReportPanel
+            from={applied.from}
+            to={applied.to}
+            onDateRangeChange={(range) => {
+              setFrom(range.from);
+              setTo(range.to);
+              setApplied(range);
+            }}
+          />
         </TabsContent>
       </Tabs>
     </div>
