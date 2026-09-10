@@ -86,7 +86,11 @@ export async function getPurchaseRegister(input: GstReportListQuery) {
       where,
       skip,
       take: limit,
-      orderBy: [{ purchaseOrder: { receivedAt: "desc" } }, { id: "desc" }],
+      orderBy: [
+        { purchaseOrder: { supplier: { name: "asc" } } },
+        { purchaseOrder: { receivedAt: "asc" } },
+        { id: "asc" },
+      ],
       include: {
         purchaseOrder: {
           select: {
@@ -95,7 +99,7 @@ export async function getPurchaseRegister(input: GstReportListQuery) {
             receivedAt: true,
             orderedAt: true,
             createdAt: true,
-            supplier: { select: { id: true, name: true } },
+            supplier: { select: { id: true, name: true, address: true, notes: true } },
           },
         },
         variant: {

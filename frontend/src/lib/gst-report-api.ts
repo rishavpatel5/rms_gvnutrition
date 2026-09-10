@@ -49,6 +49,7 @@ export type GstPurchaseRegisterLine = {
   purchaseOrderId: string;
   receivedAt: string;
   supplierName: string;
+  supplierGstin: string | null;
   variantId: string;
   productId: string;
   sku: string;
