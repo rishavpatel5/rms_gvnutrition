@@ -29,7 +29,7 @@ import {
   type GstSummaryResponse,
 } from "./gst-report-api";
 import { fetchAllPaginated } from "./fetch-paginated";
-import { formatIstDateTime, IST_TIMEZONE, istYmd } from "./ist-time";
+import { formatIstDate, formatIstDateTime, IST_TIMEZONE, istYmd } from "./ist-time";
 
 export type ReportsExportParams = {
   from: string;
@@ -736,6 +736,29 @@ function buildRichGstHsnSummarySheet(
   autoFitColumns(ws, 12, 35);
 }
 
+function getPartyName(l: { supplierName: string; brandName: string | null }): string {
+  if (!l.brandName || l.brandName.trim().toLowerCase() === l.supplierName.trim().toLowerCase()) {
+    return l.supplierName;
+  }
+  return `${l.supplierName} (${l.brandName})`;
+}
+
+function getFullProductName(l: {
+  productName: string;
+  variantLabel?: string | null;
+  flavourName?: string | null;
+  packSizeLabel?: string | null;
+}): string {
+  const parts = [l.flavourName, l.packSizeLabel].filter(Boolean);
+  if (parts.length > 0) {
+    return `${l.productName} (${parts.join(" / ")})`;
+  }
+  if (l.variantLabel && l.variantLabel !== "—") {
+    return `${l.productName} (${l.variantLabel})`;
+  }
+  return l.productName;
+}
+
 function buildRichGstPurchaseRegisterSheet(
   ws: ExcelJS.Worksheet,
   from: string,
@@ -746,18 +769,18 @@ function buildRichGstPurchaseRegisterSheet(
   ws.properties.tabColor = { argb: COLORS.EMERALD_HEADER };
 
   // Title header banner
-  ws.mergeCells("A1:T1");
+  ws.mergeCells("A1:J1");
   const titleCell = ws.getCell("A1");
-  titleCell.value = `GST PURCHASE REGISTER (ITC BASIS) — ${from} to ${to}`;
+  titleCell.value = `GST PURCHASE REPORT (COMPANY WISE) — ${from} to ${to}`;
   titleCell.font = { name: FONT_FAMILY, size: 13, bold: true, color: { argb: COLORS.WHITE } };
   titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: COLORS.EMERALD_HEADER } };
   titleCell.alignment = { vertical: "middle", horizontal: "center" };
   ws.getRow(1).height = 30;
 
   // Subtitle
-  ws.mergeCells("A2:T2");
+  ws.mergeCells("A2:J2");
   const subCell = ws.getCell("A2");
-  subCell.value = `Filtered strictly by stock received at the store in this period (eligible for Input Tax Credit). Values scaled to received quantities.`;
+  subCell.value = `Company-wise purchase register with tax breakup (Date, Bill No, Party Name, GST No, Product, Qty, Rate, Amount, GST, Total).`;
   subCell.font = { name: FONT_FAMILY, size: 9, italic: true, color: { argb: COLORS.MUTED_TEXT } };
   subCell.alignment = { vertical: "middle", horizontal: "left" };
   ws.getRow(2).height = 18;
@@ -765,26 +788,16 @@ function buildRichGstPurchaseRegisterSheet(
   ws.addRow([]); // empty row 3
 
   const headers = [
-    "Our PO Reference",
-    "Received Date (IST)",
-    "Supplier Name",
-    "SKU",
-    "Product Name",
-    "Brand",
-    "Flavour",
-    "Pack Size",
-    "HSN Code",
-    "Quantity Received",
-    "Unit Cost (₹)",
-    "Taxable Value (₹)",
-    "CGST Rate %",
-    "CGST Amount (₹)",
-    "SGST Rate %",
-    "SGST Amount (₹)",
-    "IGST Rate %",
-    "IGST Amount (₹)",
-    "Total GST (₹)",
-    "Line Total (₹)",
+    "Date",
+    "Bill no",
+    "Party name",
+    "Gst no",
+    "Product name",
+    "Qty",
+    "Rate (₹)",
+    "Amount (₹)",
+    "Gst (₹)",
+    "Total (₹)",
   ];
 
   const headerRow = ws.addRow(headers);
@@ -792,28 +805,30 @@ function buildRichGstPurchaseRegisterSheet(
 
   const startDataRow = 5;
 
-  lines.forEach((l, idx) => {
+  // Sort lines company-wise (by Party Name / Supplier, then by received date)
+  const sortedLines = [...lines].sort((a, b) => {
+    const partyA = getPartyName(a).toLowerCase();
+    const partyB = getPartyName(b).toLowerCase();
+    if (partyA !== partyB) {
+      return partyA.localeCompare(partyB);
+    }
+    const dateA = new Date(a.receivedAt).getTime();
+    const dateB = new Date(b.receivedAt).getTime();
+    return dateA - dateB;
+  });
+
+  sortedLines.forEach((l, idx) => {
     const isEven = idx % 2 === 0;
 
     const row = ws.addRow([
-      l.purchaseOrderId,
-      formatIstDateTime(l.receivedAt),
-      l.supplierName,
-      l.sku,
-      l.productName,
-      l.brandName ?? "",
-      l.flavourName ?? "",
-      l.packSizeLabel ?? "",
-      l.hsnCode ?? "",
+      formatIstDate(l.receivedAt),
+      "", // Bill no left empty for manual entry if not present
+      getPartyName(l),
+      l.supplierGstin ?? "",
+      getFullProductName(l),
       l.quantityReceived,
       num(l.unitCost),
       num(l.taxableValue),
-      num(l.cgstRate) / 100,
-      num(l.cgstAmount),
-      num(l.sgstRate) / 100,
-      num(l.sgstAmount),
-      num(l.igstRate) / 100,
-      num(l.igstAmount),
       num(l.gstAmount),
       num(l.lineTotal),
     ]);
@@ -829,43 +844,45 @@ function buildRichGstPurchaseRegisterSheet(
         fgColor: { argb: isEven ? COLORS.WHITE : COLORS.ZEBRA_BG },
       };
 
-      if (colNum === 10) {
+      if (colNum === 1) {
+        cell.alignment = { horizontal: "center" };
+      } else if (colNum === 2) {
+        cell.alignment = { horizontal: "center" };
+      } else if (colNum === 3) {
+        cell.font = { name: FONT_FAMILY, size: 9.5, bold: true, color: { argb: COLORS.DARK_TEXT } };
+        cell.alignment = { horizontal: "left" };
+      } else if (colNum === 4) {
+        cell.alignment = { horizontal: "center" };
+      } else if (colNum === 5) {
+        cell.alignment = { horizontal: "left" };
+      } else if (colNum === 6) {
         cell.numFmt = NUM_FMT.QTY;
         cell.alignment = { horizontal: "right" };
-      } else if (colNum === 13 || colNum === 15 || colNum === 17) {
-        cell.numFmt = NUM_FMT.PCT;
-        cell.alignment = { horizontal: "right" };
-      } else if (colNum === 11 || colNum === 12 || colNum === 14 || colNum === 16 || colNum === 18 || colNum === 19 || colNum === 20) {
+      } else if (colNum === 7 || colNum === 8 || colNum === 9) {
         cell.numFmt = NUM_FMT.CURRENCY_PLAIN;
         cell.alignment = { horizontal: "right" };
+      } else if (colNum === 10) {
+        cell.numFmt = NUM_FMT.CURRENCY_PLAIN;
+        cell.alignment = { horizontal: "right" };
+        cell.font = { name: FONT_FAMILY, size: 9.5, bold: true, color: { argb: COLORS.DARK_TEXT } };
       }
     });
   });
 
-  const lastDataRow = startDataRow + lines.length - 1;
+  const lastDataRow = startDataRow + sortedLines.length - 1;
 
-  if (lines.length > 0) {
+  if (sortedLines.length > 0) {
     const totalRow = ws.addRow([
       "TOTALS",
       "",
       "",
       "",
       "",
+      { formula: `SUM(F${startDataRow}:F${lastDataRow})` },
       "",
-      "",
-      "",
-      "",
+      { formula: `SUM(H${startDataRow}:H${lastDataRow})` },
+      { formula: `SUM(I${startDataRow}:I${lastDataRow})` },
       { formula: `SUM(J${startDataRow}:J${lastDataRow})` },
-      "",
-      { formula: `SUM(L${startDataRow}:L${lastDataRow})` },
-      "",
-      { formula: `SUM(N${startDataRow}:N${lastDataRow})` },
-      "",
-      { formula: `SUM(P${startDataRow}:P${lastDataRow})` },
-      "",
-      { formula: `SUM(R${startDataRow}:R${lastDataRow})` },
-      { formula: `SUM(S${startDataRow}:S${lastDataRow})` },
-      { formula: `SUM(T${startDataRow}:T${lastDataRow})` },
     ]);
 
     totalRow.height = 24;
@@ -874,10 +891,10 @@ function buildRichGstPurchaseRegisterSheet(
       cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: COLORS.TOTAL_BG } };
       setDoubleBottomBorder(cell);
 
-      if (colNum === 10) {
+      if (colNum === 6) {
         cell.numFmt = NUM_FMT.QTY;
         cell.alignment = { horizontal: "right" };
-      } else if (colNum === 12 || colNum === 14 || colNum === 16 || colNum === 18 || colNum === 19 || colNum === 20) {
+      } else if (colNum === 8 || colNum === 9 || colNum === 10) {
         cell.numFmt = NUM_FMT.CURRENCY;
         cell.alignment = { horizontal: "right" };
       }

@@ -27,7 +27,7 @@ import {
   type GstSummaryResponse,
 } from "@/lib/gst-report-api";
 import { downloadGstReportWorkbook } from "@/lib/reports-export";
-import { formatIstDateTime } from "@/lib/ist-time";
+import { formatIstDate, formatIstDateTime } from "@/lib/ist-time";
 
 const fmtInr = (n: number | string) => {
   const v = typeof n === "string" ? Number(n) : n;
@@ -588,12 +588,19 @@ function PurchaseRegisterTable({ from, to }: { from: string; to: string }) {
     void load();
   }, [load]);
 
+  const getPartyName = (r: GstPurchaseRegisterLine) => {
+    if (!r.brandName || r.brandName.trim().toLowerCase() === r.supplierName.trim().toLowerCase()) {
+      return r.supplierName;
+    }
+    return `${r.supplierName} (${r.brandName})`;
+  };
+
   return (
     <Card className="border-border/60">
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">Purchase Register</CardTitle>
+        <CardTitle className="text-base">Purchase Report (Company-Wise)</CardTitle>
         <CardDescription>
-          Stock actually received during this period (filtered by received date for Input Tax Credit reconciliation).
+          Company-wise purchase register with tax breakup (Date, Bill No, Party Name, GST No, Product, Qty, Rate, Amount, GST, Total).
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -604,45 +611,47 @@ function PurchaseRegisterTable({ from, to }: { from: string; to: string }) {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Our PO Ref</TableHead>
-                <TableHead>Our PO Date</TableHead>
-                <TableHead>Supplier</TableHead>
-                <TableHead>Product / Variant</TableHead>
-                <TableHead>HSN</TableHead>
-                <TableHead className="text-right">Qty Recd</TableHead>
-                <TableHead className="text-right">Unit Cost</TableHead>
-                <TableHead className="text-right">Taxable Val</TableHead>
-                <TableHead className="text-right">CGST</TableHead>
-                <TableHead className="text-right">SGST</TableHead>
-                <TableHead className="text-right">IGST</TableHead>
+                <TableHead>Date</TableHead>
+                <TableHead>Bill No</TableHead>
+                <TableHead>Party Name</TableHead>
+                <TableHead>GST No</TableHead>
+                <TableHead>Product Name</TableHead>
+                <TableHead className="text-right">Qty</TableHead>
+                <TableHead className="text-right">Rate</TableHead>
+                <TableHead className="text-right">Amount</TableHead>
+                <TableHead className="text-right">GST</TableHead>
                 <TableHead className="text-right">Total</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {rows.length === 0 && !loading ? (
                 <TableRow>
-                  <TableCell colSpan={12} className="py-8 text-center text-muted-foreground">
+                  <TableCell colSpan={10} className="py-8 text-center text-muted-foreground">
                     No received purchases in this period.
                   </TableCell>
                 </TableRow>
               ) : null}
               {rows.map((r) => (
                 <TableRow key={r.id}>
-                  <TableCell className="font-mono text-xs">{r.purchaseOrderId.slice(0, 10)}…</TableCell>
                   <TableCell className="whitespace-nowrap text-xs">
-                    {formatIstDateTime(r.receivedAt)}
+                    {formatIstDate(r.receivedAt)}
                   </TableCell>
-                  <TableCell className="max-w-[140px] truncate text-xs font-medium">
-                    {r.supplierName}
+                  <TableCell className="text-muted-foreground italic text-xs">
+                    —
+                  </TableCell>
+                  <TableCell className="max-w-[160px] truncate text-xs font-semibold">
+                    {getPartyName(r)}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {r.supplierGstin ?? "—"}
                   </TableCell>
                   <TableCell>
                     <div className="text-xs font-medium">{r.productName}</div>
                     <div className="text-[11px] text-muted-foreground">
-                      <FlavourLabel flavour={r.flavourName}>{r.variantLabel}</FlavourLabel> ·{" "}
-                      <span className="font-mono">{r.sku}</span>
+                      <FlavourLabel flavour={r.flavourName}>{r.variantLabel}</FlavourLabel>
+                      {r.hsnCode ? ` · HSN: ${r.hsnCode}` : ""}
                     </div>
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{r.hsnCode ?? "—"}</TableCell>
                   <TableCell className="text-right tabular-nums text-xs font-medium">
                     {r.quantityReceived}
                   </TableCell>
@@ -652,20 +661,11 @@ function PurchaseRegisterTable({ from, to }: { from: string; to: string }) {
                   <TableCell className="text-right tabular-nums text-xs">
                     {fmtInr(r.taxableValue)}
                   </TableCell>
-                  <TableCell className="text-right tabular-nums text-xs">
-                    {fmtInr(r.cgstAmount)}
-                    <span className="block text-[10px] text-muted-foreground">
-                      ({Number(r.cgstRate)}%)
+                  <TableCell className="text-right tabular-nums text-xs font-medium text-emerald-700 dark:text-emerald-400">
+                    {fmtInr(r.gstAmount)}
+                    <span className="block text-[10px] text-muted-foreground font-normal">
+                      ({Number(r.cgstRate) + Number(r.sgstRate) + Number(r.igstRate)}%)
                     </span>
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums text-xs">
-                    {fmtInr(r.sgstAmount)}
-                    <span className="block text-[10px] text-muted-foreground">
-                      ({Number(r.sgstRate)}%)
-                    </span>
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums text-xs">
-                    {fmtInr(r.igstAmount)}
                   </TableCell>
                   <TableCell className="text-right font-semibold tabular-nums text-xs">
                     {fmtInr(r.lineTotal)}

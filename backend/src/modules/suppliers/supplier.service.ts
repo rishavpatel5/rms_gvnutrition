@@ -3,6 +3,23 @@ import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildMeta, parsePagination } from "../../lib/pagination.js";
 
+export function extractSupplierGstin(address: unknown): string | null {
+  if (address && typeof address === "object" && !Array.isArray(address)) {
+    const obj = address as Record<string, unknown>;
+    if (typeof obj.gstin === "string" && obj.gstin.trim()) return obj.gstin.trim();
+    if (typeof obj.gstNumber === "string" && obj.gstNumber.trim()) return obj.gstNumber.trim();
+    if (typeof obj.gst === "string" && obj.gst.trim()) return obj.gst.trim();
+  }
+  return null;
+}
+
+export function formatSupplier<T extends { address?: unknown }>(supplier: T): T & { gstin: string | null } {
+  return {
+    ...supplier,
+    gstin: extractSupplierGstin(supplier.address),
+  };
+}
+
 export async function listSuppliers(query: Record<string, unknown>) {
   const { page, limit, skip } = parsePagination(query);
   const search =
@@ -42,7 +59,7 @@ export async function listSuppliers(query: Record<string, unknown>) {
     prisma.supplier.count({ where }),
   ]);
 
-  return { items, meta: buildMeta(page, limit, total) };
+  return { items: items.map(formatSupplier), meta: buildMeta(page, limit, total) };
 }
 
 export async function getSupplierById(id: string) {
@@ -63,25 +80,37 @@ export async function getSupplierById(id: string) {
     },
   });
   if (!row) throw new AppError(404, "SUPPLIER_NOT_FOUND", "Supplier not found");
-  return row;
+  return formatSupplier(row);
 }
 
 export async function createSupplier(input: {
   name: string;
   phone?: string | null;
   email?: string | null;
+  gstin?: string | null;
   address?: Prisma.InputJsonValue | null;
   notes?: string | null;
 }) {
-  return prisma.supplier.create({
+  const gstin = input.gstin?.trim() || null;
+  let addrObj: Record<string, unknown> = {};
+  if (input.address && typeof input.address === "object" && !Array.isArray(input.address)) {
+    addrObj = { ...(input.address as Record<string, unknown>) };
+  }
+  if (gstin) {
+    addrObj.gstin = gstin;
+  }
+
+  const supplier = await prisma.supplier.create({
     data: {
       name: input.name.trim(),
       phone: input.phone?.trim() || null,
       email: input.email?.trim().toLowerCase() || null,
-      address: input.address ?? undefined,
+      address: (Object.keys(addrObj).length > 0 ? addrObj : undefined) as Prisma.InputJsonValue | undefined,
       notes: input.notes?.trim() || null,
     },
   });
+
+  return formatSupplier(supplier);
 }
 
 export async function updateSupplier(
@@ -90,13 +119,35 @@ export async function updateSupplier(
     name?: string;
     phone?: string | null;
     email?: string | null;
+    gstin?: string | null;
     address?: Prisma.InputJsonValue | null;
     notes?: string | null;
     isActive?: boolean;
   },
 ) {
   try {
-    return await prisma.supplier.update({
+    const existing = await prisma.supplier.findUnique({ where: { id } });
+    if (!existing) throw new AppError(404, "SUPPLIER_NOT_FOUND", "Supplier not found");
+
+    let addrObj: Record<string, unknown> | undefined = undefined;
+    if (input.address !== undefined || input.gstin !== undefined) {
+      const base = (existing.address && typeof existing.address === "object" && !Array.isArray(existing.address))
+        ? { ...(existing.address as Record<string, unknown>) }
+        : {};
+      if (input.address && typeof input.address === "object" && !Array.isArray(input.address)) {
+        Object.assign(base, input.address as Record<string, unknown>);
+      }
+      if (input.gstin !== undefined) {
+        if (input.gstin?.trim()) {
+          base.gstin = input.gstin.trim();
+        } else {
+          delete base.gstin;
+        }
+      }
+      addrObj = base;
+    }
+
+    const updated = await prisma.supplier.update({
       where: { id },
       data: {
         ...(input.name !== undefined ? { name: input.name.trim() } : {}),
@@ -106,11 +157,13 @@ export async function updateSupplier(
         ...(input.email !== undefined
           ? { email: input.email?.trim().toLowerCase() || null }
           : {}),
-        ...(input.address !== undefined ? { address: input.address ?? undefined } : {}),
+        ...(addrObj !== undefined ? { address: addrObj as Prisma.InputJsonValue } : {}),
         ...(input.notes !== undefined ? { notes: input.notes?.trim() || null } : {}),
         ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
       },
     });
+
+    return formatSupplier(updated);
   } catch (e: unknown) {
     const code =
       typeof e === "object" && e !== null && "code" in e

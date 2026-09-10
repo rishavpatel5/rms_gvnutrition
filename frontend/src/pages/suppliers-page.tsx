@@ -26,26 +26,38 @@ import { cn } from "@/lib/utils";
 type Supplier = {
   id: string;
   name: string;
-  phone: string | null;
-  email: string | null;
+  phone?: string | null;
+  email?: string | null;
+  gstin?: string | null;
+  address?: Record<string, unknown> | null;
   isActive: boolean;
   _count?: { purchaseOrders: number };
 };
 
-/** The three editable fields, held while a row is being edited. */
-type Draft = { name: string; phone: string; email: string };
+/** The editable fields, held while a row is being edited. */
+type Draft = { name: string; gstin: string };
+
+function getSupplierGstin(s: Supplier): string {
+  if (s.gstin) return s.gstin;
+  if (s.address && typeof s.address === "object") {
+    const a = s.address as Record<string, unknown>;
+    if (typeof a.gstin === "string") return a.gstin;
+    if (typeof a.gstNumber === "string") return a.gstNumber;
+    if (typeof a.gst === "string") return a.gst;
+  }
+  return "";
+}
 
 export function SuppliersPage() {
   const authed = Boolean(getStoredAccessToken());
   const [rows, setRows] = useState<Supplier[]>([]);
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [email, setEmail] = useState("");
+  const [gstin, setGstin] = useState("");
   const [busy, setBusy] = useState(false);
 
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [draft, setDraft] = useState<Draft>({ name: "", phone: "", email: "" });
+  const [draft, setDraft] = useState<Draft>({ name: "", gstin: "" });
   const [savingId, setSavingId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -79,17 +91,13 @@ export function SuppliersPage() {
     try {
       await apiPostJsonAuthed("/api/v1/suppliers", {
         name: name.trim(),
-        phone: phone.trim() || null,
-        email: email.trim() || null,
+        gstin: gstin.trim().toUpperCase() || null,
       });
       setName("");
-      setPhone("");
-      setEmail("");
+      setGstin("");
       await load();
       toast.success("Supplier added");
     } catch (e) {
-      // Previously swallowed, so a rejected email or a duplicate looked like
-      // nothing had happened at all.
       toast.error(e instanceof Error ? e.message : "Could not add supplier");
     } finally {
       setBusy(false);
@@ -99,7 +107,7 @@ export function SuppliersPage() {
   function startEdit(s: Supplier) {
     setEditingId(s.id);
     setConfirmDeleteId(null);
-    setDraft({ name: s.name, phone: s.phone ?? "", email: s.email ?? "" });
+    setDraft({ name: s.name, gstin: getSupplierGstin(s) });
   }
 
   async function saveEdit(id: string) {
@@ -111,8 +119,7 @@ export function SuppliersPage() {
     try {
       const updated = await apiPatchJsonAuthed<Supplier>(`/api/v1/suppliers/${id}`, {
         name: draft.name.trim(),
-        phone: draft.phone.trim() || null,
-        email: draft.email.trim() || null,
+        gstin: draft.gstin.trim().toUpperCase() || null,
       });
       setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...updated } : r)));
       setEditingId(null);
@@ -186,24 +193,29 @@ export function SuppliersPage() {
         <CardHeader>
           <CardTitle className="text-base">Add supplier</CardTitle>
         </CardHeader>
-        <CardContent className="grid gap-3 sm:grid-cols-3">
+        <CardContent className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-2">
             <Label>Name</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} />
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Bright Commodities / Optimum Nutrition"
+            />
           </div>
           <div className="space-y-2">
-            <Label>Phone</Label>
-            <Input value={phone} onChange={(e) => setPhone(e.target.value)} />
-          </div>
-          <div className="space-y-2">
-            <Label>Email</Label>
-            <Input value={email} onChange={(e) => setEmail(e.target.value)} />
+            <Label>GST No (optional)</Label>
+            <Input
+              value={gstin}
+              onChange={(e) => setGstin(e.target.value.toUpperCase())}
+              placeholder="e.g. 27AABCB1234F1Z9"
+              className="font-mono uppercase"
+            />
           </div>
           <Button
             type="button"
             disabled={busy}
             onClick={() => void create()}
-            className="sm:col-span-3 w-fit rounded-xl"
+            className="sm:col-span-2 w-fit rounded-xl"
           >
             {busy ? <Loader2 className="size-4 animate-spin" /> : "Save"}
           </Button>
@@ -232,8 +244,7 @@ export function SuppliersPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Name</TableHead>
-                  <TableHead>Phone</TableHead>
-                  <TableHead>Email</TableHead>
+                  <TableHead>GST No</TableHead>
                   <TableHead className="text-right">POs</TableHead>
                   <TableHead className="w-[132px] text-right">Actions</TableHead>
                 </TableRow>
@@ -244,6 +255,7 @@ export function SuppliersPage() {
                   const isSaving = savingId === s.id;
                   const isDeleting = deletingId === s.id;
                   const confirming = confirmDeleteId === s.id;
+                  const currentGstin = getSupplierGstin(s);
 
                   if (isEditing) {
                     return (
@@ -262,16 +274,14 @@ export function SuppliersPage() {
                         </TableCell>
                         <TableCell>
                           <Input
-                            className="h-8"
-                            value={draft.phone}
-                            onChange={(e) => setDraft({ ...draft, phone: e.target.value })}
-                          />
-                        </TableCell>
-                        <TableCell>
-                          <Input
-                            className="h-8"
-                            value={draft.email}
-                            onChange={(e) => setDraft({ ...draft, email: e.target.value })}
+                            className="h-8 font-mono uppercase text-xs"
+                            placeholder="GST No (optional)"
+                            value={draft.gstin}
+                            onChange={(e) => setDraft({ ...draft, gstin: e.target.value.toUpperCase() })}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") void saveEdit(s.id);
+                              if (e.key === "Escape") setEditingId(null);
+                            }}
                           />
                         </TableCell>
                         <TableCell className="text-right tabular-nums text-muted-foreground">
@@ -313,8 +323,13 @@ export function SuppliersPage() {
                           </span>
                         ) : null}
                       </TableCell>
-                      <TableCell className="text-muted-foreground">{s.phone ?? "—"}</TableCell>
-                      <TableCell className="text-muted-foreground">{s.email ?? "—"}</TableCell>
+                      <TableCell className="font-mono text-xs text-muted-foreground">
+                        {currentGstin ? (
+                          <span className="text-foreground">{currentGstin}</span>
+                        ) : (
+                          "—"
+                        )}
+                      </TableCell>
                       <TableCell className="text-right tabular-nums">
                         {s._count?.purchaseOrders ?? 0}
                       </TableCell>

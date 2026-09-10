@@ -89,7 +89,7 @@ export type PurchaseRegisterRowPayload = Prisma.PurchaseOrderItemGetPayload<{
         receivedAt: true;
         orderedAt: true;
         createdAt: true;
-        supplier: { select: { id: true; name: true } };
+        supplier: { select: { id: true; name: true; address: true; notes: true } };
       };
     };
     variant: {
@@ -130,11 +130,25 @@ export function serializePurchaseRegisterLine(row: PurchaseRegisterRowPayload) {
 
   const gstAmt = cgstAmt.plus(sgstAmt).plus(igstAmt);
 
+  // Extract supplier GSTIN if stored in supplier address or notes
+  let supplierGstin: string | null = null;
+  const addr = row.purchaseOrder.supplier.address as Record<string, unknown> | null;
+  if (addr && typeof addr === "object") {
+    if (typeof addr.gstin === "string" && addr.gstin.trim()) {
+      supplierGstin = addr.gstin.trim();
+    } else if (typeof addr.gstNumber === "string" && addr.gstNumber.trim()) {
+      supplierGstin = addr.gstNumber.trim();
+    } else if (typeof addr.gst === "string" && addr.gst.trim()) {
+      supplierGstin = addr.gst.trim();
+    }
+  }
+
   return {
     id: row.id,
     purchaseOrderId: row.purchaseOrder.id,
     receivedAt: row.purchaseOrder.receivedAt?.toISOString() ?? row.purchaseOrder.createdAt.toISOString(),
     supplierName: row.purchaseOrder.supplier.name,
+    supplierGstin,
     variantId: row.variantId,
     productId: p.id,
     sku: v.sku,
