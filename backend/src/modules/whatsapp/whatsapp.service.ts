@@ -11,30 +11,332 @@ function invoiceLink(orderId: string): string {
   return `${env.PUBLIC_API_BASE_URL.replace(/\/$/, "")}/i/${encodeURIComponent(orderId)}`;
 }
 
-function extractProviderMessageId(body: unknown): string | null {
+export function extractProviderMessageId(body: unknown): string | null {
   if (body && typeof body === "object") {
     const b = body as Record<string, unknown>;
     for (const key of ["id", "messageId", "whatsappMessageId", "ticketId"]) {
       const v = b[key];
       if (typeof v === "string" && v.length > 0) return v;
     }
+    if (Array.isArray(b.receivers) && b.receivers.length > 0) {
+      const first = b.receivers[0] as Record<string, unknown>;
+      if (typeof first?.localMessageId === "string" && first.localMessageId.length > 0) {
+        return first.localMessageId;
+      }
+    }
   }
   return null;
 }
 
 /**
- * WATI accepted the message when it returns 2xx and does not explicitly say `result: false`.
- * Note: `validWhatsAppNumber` is NOT used as a failure signal — WATI sets it from a cache and it
- * can be false even when the message is delivered, which would otherwise cause false "rejected".
+ * Helper to check if a value represents an explicit success in WATI result field.
  */
-function isWatiSuccess(res: { ok: boolean; body: unknown }): boolean {
-  if (!res.ok) return false;
+export function isExplicitSuccessResult(result: unknown): boolean {
+  if (result === true) return true;
+  if (typeof result === "string") {
+    const r = result.trim().toLowerCase();
+    return r === "success" || r === "true" || r === "ok";
+  }
+  return false;
+}
+
+/**
+ * Helper to check if a value represents an explicit failure in WATI result field.
+ */
+export function isExplicitFailureResult(result: unknown): boolean {
+  if (result === false) return true;
+  if (typeof result === "string") {
+    const r = result.trim().toLowerCase();
+    return ["false", "error", "failed", "no_available_payment", "rejected", "failure"].includes(r);
+  }
+  return false;
+}
+
+/**
+ * Extract all error messages and descriptions from various WATI response schemas.
+ */
+export function collectWatiErrorMessages(body: unknown): string[] {
+  const messages: string[] = [];
+  if (!body) return messages;
+
+  if (typeof body !== "object") {
+    if (typeof body === "string" && body.trim().length > 0) {
+      messages.push(body.trim());
+    }
+    return messages;
+  }
+
+  const b = body as Record<string, unknown>;
+
+  // Direct string message fields
+  for (const field of ["message", "detail", "title", "description"]) {
+    const val = b[field];
+    if (typeof val === "string" && val.trim().length > 0) {
+      messages.push(val.trim());
+    }
+  }
+
+  // WATI info field
+  if (
+    typeof b.info === "string" &&
+    b.info.trim().length > 0 &&
+    !["success", "ok", "message accepted"].includes(b.info.trim().toLowerCase())
+  ) {
+    messages.push(b.info.trim());
+  }
+
+  // b.error can be a string or object
+  if (typeof b.error === "string" && b.error.trim().length > 0) {
+    messages.push(b.error.trim());
+  } else if (b.error && typeof b.error === "object") {
+    const errObj = b.error as Record<string, unknown>;
+    if (typeof errObj.message === "string" && errObj.message.trim().length > 0) {
+      messages.push(errObj.message.trim());
+    }
+    if (typeof errObj.error === "string" && errObj.error.trim().length > 0) {
+      messages.push(errObj.error.trim());
+    }
+  }
+
+  // b.errors can be an array or ModelState dictionary
+  if (Array.isArray(b.errors)) {
+    for (const item of b.errors) {
+      if (typeof item === "string" && item.trim().length > 0) {
+        messages.push(item.trim());
+      } else if (item && typeof item === "object") {
+        const itemObj = item as Record<string, unknown>;
+        if (typeof itemObj.error === "string") messages.push(itemObj.error.trim());
+        if (typeof itemObj.message === "string") messages.push(itemObj.message.trim());
+        if (typeof itemObj.description === "string") messages.push(itemObj.description.trim());
+      }
+    }
+  } else if (b.errors && typeof b.errors === "object") {
+    for (const val of Object.values(b.errors)) {
+      if (Array.isArray(val)) {
+        for (const item of val) {
+          if (typeof item === "string" && item.trim().length > 0) messages.push(item.trim());
+        }
+      } else if (typeof val === "string" && val.trim().length > 0) {
+        messages.push(val.trim());
+      }
+    }
+  }
+
+  // b.modelState validation errors
+  if (b.modelState && typeof b.modelState === "object") {
+    for (const val of Object.values(b.modelState)) {
+      if (Array.isArray(val)) {
+        for (const item of val) {
+          if (typeof item === "string" && item.trim().length > 0) messages.push(item.trim());
+        }
+      } else if (typeof val === "string" && val.trim().length > 0) {
+        messages.push(val.trim());
+      }
+    }
+  }
+
+  // b.receivers array
+  if (Array.isArray(b.receivers)) {
+    for (const r of b.receivers) {
+      if (r && typeof r === "object") {
+        const rObj = r as Record<string, unknown>;
+        if (Array.isArray(rObj.errors)) {
+          for (const item of rObj.errors) {
+            if (typeof item === "string" && item.trim().length > 0) {
+              messages.push(item.trim());
+            } else if (item && typeof item === "object") {
+              const itemObj = item as Record<string, unknown>;
+              if (typeof itemObj.error === "string") messages.push(itemObj.error.trim());
+              if (typeof itemObj.message === "string") messages.push(itemObj.message.trim());
+            }
+          }
+        }
+        if (
+          rObj.isValidWhatsAppNumber === false &&
+          Array.isArray(rObj.errors) &&
+          rObj.errors.length > 0
+        ) {
+          messages.push("Receiver number is not a valid WhatsApp number");
+        }
+      }
+    }
+  }
+
+  return Array.from(new Set(messages)).filter(Boolean);
+}
+
+export type WatiAnalysis = {
+  isSuccess: boolean;
+  httpStatus: number;
+  errorCode: string;
+  userMessage: string;
+  rawDetails: string;
+  isUnconfirmed: boolean;
+};
+
+/**
+ * Robustly inspect WATI API responses to determine success and accurately diagnose failures.
+ */
+export function parseWatiResponse(
+  res: { ok: boolean; status: number; body: unknown },
+  context: { phone: string; templateName: string },
+): WatiAnalysis {
+  const rawDetails =
+    typeof res.body === "string" ? res.body : JSON.stringify(res.body ?? {});
+
+  let hasExplicitFailure = false;
+  let hasExplicitSuccess = false;
+  let hasReceiverErrors = false;
+  let hasModelStateErrors = false;
+  let hasGeneralErrors = false;
+
   if (res.body && typeof res.body === "object") {
     const b = res.body as Record<string, unknown>;
-    if (b.result === false) return false;
-    if (typeof b.result === "string" && b.result.toLowerCase() === "false") return false;
+    hasExplicitFailure = isExplicitFailureResult(b.result);
+    hasExplicitSuccess = isExplicitSuccessResult(b.result);
+
+    if (b.error !== undefined && b.error !== null && b.error !== "") {
+      hasGeneralErrors = true;
+    }
+    if (Array.isArray(b.errors) && b.errors.length > 0) {
+      hasGeneralErrors = true;
+    } else if (b.errors && typeof b.errors === "object" && Object.keys(b.errors).length > 0) {
+      hasGeneralErrors = true;
+    }
+    if (b.modelState && typeof b.modelState === "object" && Object.keys(b.modelState).length > 0) {
+      hasModelStateErrors = true;
+    }
+    if (Array.isArray(b.receivers)) {
+      for (const r of b.receivers) {
+        if (r && typeof r === "object") {
+          const rObj = r as Record<string, unknown>;
+          if (Array.isArray(rObj.errors) && rObj.errors.length > 0) {
+            hasReceiverErrors = true;
+          }
+        }
+      }
+    }
   }
-  return true;
+
+  const isSuccess =
+    res.ok &&
+    !hasExplicitFailure &&
+    !hasGeneralErrors &&
+    !hasModelStateErrors &&
+    !hasReceiverErrors &&
+    (hasExplicitSuccess || (!res.body || typeof res.body !== "object" || (res.status >= 200 && res.status < 300)));
+
+  if (isSuccess) {
+    return {
+      isSuccess: true,
+      httpStatus: res.status,
+      errorCode: "OK",
+      userMessage: "Invoice sent on WhatsApp successfully",
+      rawDetails,
+      isUnconfirmed: false,
+    };
+  }
+
+  const errorMessages = collectWatiErrorMessages(res.body);
+
+  const combinedText = [
+    `HTTP_${res.status}`,
+    ...errorMessages,
+    rawDetails,
+  ].join(" ").toLowerCase();
+
+  const primaryRawMsg =
+    errorMessages[0] ||
+    (res.status >= 400 ? `HTTP ${res.status}` : "Message rejected by WATI provider");
+
+  // 1. Server Error / Network Timeout (ambiguous delivery -> UNCONFIRMED)
+  if (res.status >= 500) {
+    return {
+      isSuccess: false,
+      httpStatus: res.status,
+      errorCode: "UNCONFIRMED",
+      userMessage: `WATI server encountered an error (HTTP ${res.status}). Message delivery is unconfirmed. Check customer's WhatsApp before resending.`,
+      rawDetails,
+      isUnconfirmed: true,
+    };
+  }
+
+  // 2. Authentication / Permissions
+  if (
+    res.status === 401 ||
+    res.status === 403 ||
+    /unauthorized|forbidden|invalid.*token|bearer.*invalid|access.*token.*expired|invalid.*api.*key/i.test(
+      combinedText,
+    )
+  ) {
+    return {
+      isSuccess: false,
+      httpStatus: res.status,
+      errorCode: "WATI_AUTH_FAILED",
+      userMessage: `WATI authentication failed. Your WATI Access Token or Base URL is invalid/expired. Please check your backend WATI credentials. (${primaryRawMsg})`,
+      rawDetails,
+      isUnconfirmed: false,
+    };
+  }
+
+  // 3. Wallet / Recharge / Billing / Subscription Expired / Repurchase Required
+  if (
+    res.status === 402 ||
+    /insufficient|balance|credit|wallet|recharge|payment|billing|subscription|expired|repurchase|no_available_payment|unpaid|payment_required|suspended|quota|limit_reached|deactivated/i.test(
+      combinedText,
+    )
+  ) {
+    return {
+      isSuccess: false,
+      httpStatus: res.status,
+      errorCode: "WATI_WALLET_EMPTY",
+      userMessage: `WATI wallet balance is exhausted or API subscription is unpaid/expired. Please recharge your WATI wallet or renew your plan in the WATI dashboard to send WhatsApp invoices. (${primaryRawMsg})`,
+      rawDetails,
+      isUnconfirmed: false,
+    };
+  }
+
+  // 4. Template Error (Not found, not approved, param mismatch)
+  if (
+    /template|template_name|broadcast_name|not approved|does not exist|parameter|variable.*mismatch|header mismatch/i.test(
+      combinedText,
+    )
+  ) {
+    return {
+      isSuccess: false,
+      httpStatus: res.status,
+      errorCode: "WATI_TEMPLATE_ERROR",
+      userMessage: `WATI template error: Template '${context.templateName}' was not found or is not approved in your WATI account. Check your WATI dashboard. (${primaryRawMsg})`,
+      rawDetails,
+      isUnconfirmed: false,
+    };
+  }
+
+  // 5. Invalid Phone Number / Not on WhatsApp
+  if (
+    /invalid.*(?:number|phone|whatsapp)|not on whatsapp|131026|undeliverable|validwhatsappnumber.*false|invalidwhatsappnumber/i.test(
+      combinedText,
+    )
+  ) {
+    return {
+      isSuccess: false,
+      httpStatus: res.status,
+      errorCode: "WATI_INVALID_PHONE",
+      userMessage: `Customer phone number (${context.phone}) is invalid or not registered on WhatsApp. (${primaryRawMsg})`,
+      rawDetails,
+      isUnconfirmed: false,
+    };
+  }
+
+  // 6. Generic rejection
+  return {
+    isSuccess: false,
+    httpStatus: res.status,
+    errorCode: `WATI_REJECTED_HTTP_${res.status}`,
+    userMessage: `WhatsApp message was rejected by WATI: ${primaryRawMsg}`,
+    rawDetails,
+    isUnconfirmed: false,
+  };
 }
 
 export type SendInvoiceResult = {
@@ -120,7 +422,6 @@ export async function sendInvoiceForOrder(input: {
     { name: "4", value: invoiceLink(orderId) },
   ];
 
-  // Dry-run when disabled: record intent, do not call WATI. Lets us build/test without a token.
   if (!env.WHATSAPP_ENABLED) {
     await prisma.whatsAppLog.create({
       data: {
@@ -128,12 +429,17 @@ export async function sendInvoiceForOrder(input: {
         orderId,
         templateName: env.WATI_INVOICE_TEMPLATE_NAME,
         toPhone: phone,
-        payload: { dryRun: true, parameters } as Prisma.InputJsonValue,
-        status: WhatsAppMessageStatus.QUEUED,
+        payload: { parameters } as Prisma.InputJsonValue,
+        status: WhatsAppMessageStatus.FAILED,
+        errorCode: "WHATSAPP_DISABLED",
+        errorDetail: "WHATSAPP_ENABLED is set to false in server environment variables.",
       },
     });
-    logger.info({ orderId, phone, parameters }, "WhatsApp dry-run (WHATSAPP_ENABLED=false)");
-    return { status: WhatsAppMessageStatus.QUEUED, dryRun: true };
+    throw new AppError(
+      400,
+      "WHATSAPP_DISABLED",
+      "WhatsApp automated invoice sending is disabled in server settings (WHATSAPP_ENABLED=false). Configure WATI in backend environment variables to send automated messages, or use the manual WhatsApp Share option.",
+    );
   }
 
   const log = await prisma.whatsAppLog.create({
@@ -168,30 +474,33 @@ export async function sendInvoiceForOrder(input: {
     throw new AppError(
       502,
       "WHATSAPP_SEND_UNCONFIRMED",
-      "Couldn't confirm the WhatsApp send (network/timeout). It may already have been delivered — check the customer's WhatsApp before resending.",
+      `Couldn't confirm the WhatsApp send: ${detail}. Delivery is unconfirmed — check customer's WhatsApp before resending.`,
     );
   }
 
-  if (!isWatiSuccess(res)) {
-    // A 5xx means WATI itself errored — delivery is ambiguous, so treat as UNCONFIRMED.
-    // A 4xx / explicit body-level rejection means it was definitely NOT sent — safe to retry.
-    const unconfirmed = res.status >= 500;
-    const detail = typeof res.body === "string" ? res.body : JSON.stringify(res.body);
+  const analysis = parseWatiResponse(res, {
+    phone,
+    templateName: env.WATI_INVOICE_TEMPLATE_NAME,
+  });
+
+  if (!analysis.isSuccess) {
     await prisma.whatsAppLog.update({
       where: { id: log.id },
       data: {
         status: WhatsAppMessageStatus.FAILED,
-        errorCode: unconfirmed ? "UNCONFIRMED" : `HTTP_${res.status}`,
-        errorDetail: detail.slice(0, 1000),
+        errorCode: analysis.errorCode,
+        errorDetail: analysis.rawDetails.slice(0, 1000),
         payload: { parameters, response: res.body } as Prisma.InputJsonValue,
       },
     });
+    logger.warn(
+      { orderId, phone, status: res.status, errorCode: analysis.errorCode, body: res.body },
+      "WATI WhatsApp invoice send failed",
+    );
     throw new AppError(
-      502,
-      unconfirmed ? "WHATSAPP_SEND_UNCONFIRMED" : "WHATSAPP_SEND_FAILED",
-      unconfirmed
-        ? "WhatsApp provider had a server error — delivery is unconfirmed. Check before resending."
-        : "WhatsApp provider rejected the message",
+      analysis.isUnconfirmed ? 502 : 400,
+      analysis.errorCode,
+      analysis.userMessage,
     );
   }
 
@@ -204,6 +513,11 @@ export async function sendInvoiceForOrder(input: {
       payload: { parameters, response: res.body } as Prisma.InputJsonValue,
     },
   });
+
+  logger.info(
+    { orderId, phone, providerMessageId: extractProviderMessageId(res.body) },
+    "WATI WhatsApp invoice sent successfully",
+  );
 
   return { status: WhatsAppMessageStatus.SENT };
 }
