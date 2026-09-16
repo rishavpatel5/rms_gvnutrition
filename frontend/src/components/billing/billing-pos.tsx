@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Keyboard,
   Loader2,
   MessageCircle,
@@ -384,15 +385,11 @@ export function BillingPos() {
     setSending(true);
     setSendErr(null);
     try {
-      const out = await sendInvoiceWhatsApp(lastSale.orderId, force);
+      await sendInvoiceWhatsApp(lastSale.orderId, force);
       setSendPromptOpen(false);
-      toast.success(
-        out.dryRun
-          ? "Invoice queued (WhatsApp is in test mode)"
-          : "Invoice sent on WhatsApp",
-      );
+      toast.success("Invoice sent to customer's WhatsApp successfully!");
     } catch (e) {
-      setSendErr(e instanceof Error ? e.message : "Failed to send invoice");
+      setSendErr(e instanceof Error ? e.message : "Failed to send invoice on WhatsApp");
     } finally {
       setSending(false);
     }
@@ -847,7 +844,26 @@ export function BillingPos() {
               ) : null}
             </DialogDescription>
           </DialogHeader>
-          {sendErr ? <p className="text-sm text-destructive">{sendErr}</p> : null}
+          {sendErr ? (
+            <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm space-y-2">
+              <div className="flex items-start gap-2.5">
+                <AlertTriangle className="size-4 shrink-0 mt-0.5 text-destructive" />
+                <div className="space-y-1">
+                  <p className="font-semibold text-destructive text-xs uppercase tracking-wider">
+                    WhatsApp Delivery Failed
+                  </p>
+                  <p className="text-xs text-foreground/90 leading-relaxed">
+                    {sendErr}
+                  </p>
+                </div>
+              </div>
+              {whatsAppShare ? (
+                <p className="text-xs text-muted-foreground pt-1 border-t border-destructive/20">
+                  💡 <span className="font-medium text-foreground">Immediate Fallback:</span> You can share this invoice right now for free via WhatsApp Web / App using the green button below.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           <DialogFooter className="gap-2 sm:justify-between">
             <Button
               type="button"
@@ -858,7 +874,7 @@ export function BillingPos() {
               <Receipt className="size-4" />
               Preview
             </Button>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
               <Button
                 type="button"
                 variant="ghost"
@@ -870,6 +886,20 @@ export function BillingPos() {
               >
                 Skip
               </Button>
+              {sendErr && whatsAppShare ? (
+                <Button
+                  type="button"
+                  className="gap-2 bg-emerald-600 text-white hover:bg-emerald-700 dark:bg-emerald-600 dark:hover:bg-emerald-700"
+                  onClick={() => {
+                    window.open(whatsAppShare.href, "_blank", "noopener,noreferrer");
+                    setSendPromptOpen(false);
+                    setSendErr(null);
+                  }}
+                >
+                  <MessageCircle className="size-4" />
+                  Share via WhatsApp (Free)
+                </Button>
+              ) : null}
               {sendErr ? (
                 <Button
                   type="button"
@@ -881,12 +911,12 @@ export function BillingPos() {
                   {sending ? (
                     <>
                       <Loader2 className="size-4 animate-spin" />
-                      Resending…
+                      Retrying…
                     </>
                   ) : (
                     <>
-                      <MessageCircle className="size-4" />
-                      Resend anyway
+                      <RefreshCw className="size-3.5" />
+                      Retry automated send
                     </>
                   )}
                 </Button>
