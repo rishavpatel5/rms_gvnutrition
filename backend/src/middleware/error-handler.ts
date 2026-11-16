@@ -38,6 +38,42 @@ export function errorHandler(
     return;
   }
 
+  // Safety net for Prisma errors no service caught explicitly. Without this a
+  // duplicate name (P2002) or a stale id (P2025) surfaces as a bare 500
+  // "Internal server error" in production, which tells the user nothing.
+  const prismaCode =
+    typeof err === "object" && err !== null && "code" in err
+      ? String((err as { code?: unknown }).code)
+      : "";
+  if (prismaCode === "P2002") {
+    const target = (err as { meta?: { target?: unknown } }).meta?.target;
+    const fields = Array.isArray(target) ? target.join(", ") : typeof target === "string" ? target : "";
+    res.status(409).json({
+      error: {
+        code: "DUPLICATE",
+        message: fields
+          ? `A record with this ${fields} already exists`
+          : "A record with these details already exists",
+      },
+    });
+    return;
+  }
+  if (prismaCode === "P2025") {
+    res.status(404).json({
+      error: { code: "NOT_FOUND", message: "Record not found" },
+    });
+    return;
+  }
+  if (prismaCode === "P2003") {
+    res.status(409).json({
+      error: {
+        code: "IN_USE",
+        message: "This record is linked to other data and cannot be changed or removed",
+      },
+    });
+    return;
+  }
+
   const message =
     err instanceof Error ? err.message : "An unexpected error occurred";
   res.status(500).json({

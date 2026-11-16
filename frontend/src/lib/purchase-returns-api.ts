@@ -1,3 +1,4 @@
+import { fetchAllRows } from "@/lib/fetch-paginated";
 import {
   apiGetJsonAuthed,
   apiGetJsonAuthedWithMeta,
@@ -54,7 +55,7 @@ export type PurchaseReturnListRow = {
 };
 
 export async function listSuppliers(): Promise<SupplierRow[]> {
-  const { data } = await apiGetJsonAuthedWithMeta<SupplierRow[]>("/api/v1/suppliers?limit=200&isActive=true");
+  const data = await fetchAllRows<SupplierRow>("/api/v1/suppliers?isActive=true");
   return data;
 }
 

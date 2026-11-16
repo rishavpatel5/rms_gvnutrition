@@ -1,3 +1,4 @@
+import { fetchAllRows } from "@/lib/fetch-paginated";
 import {
   Keyboard,
   Loader2,
@@ -19,7 +20,6 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import {
   apiGetJsonAuthed,
-  apiGetJsonAuthedWithMeta,
   apiPostJsonAuthed,
   getStoredAccessToken,
 } from "@/lib/api-client";
@@ -168,7 +168,7 @@ export function PurchasesPage() {
     if (!authed) return;
     setLoading(true);
     try {
-      const { data } = await apiGetJsonAuthedWithMeta<Supplier[]>("/api/v1/suppliers?limit=200&isActive=true");
+      const data = await fetchAllRows<Supplier>("/api/v1/suppliers?isActive=true");
       setSuppliers(data);
       setSupplierId((prev) => prev || data[0]?.id || "");
     } finally {
@@ -231,9 +231,7 @@ export function PurchasesPage() {
     void (async () => {
       setVariantsLoading(true);
       try {
-        const { data } = await apiGetJsonAuthedWithMeta<VariantRow[]>(
-          `/api/v1/catalog/products/${selectedProductId}/variants?limit=200`,
-        );
+        const data = await fetchAllRows<VariantRow>(`/api/v1/catalog/products/${selectedProductId}/variants`);
         if (!cancelled) {
           setVariants(data);
           setSelectedVariantIndex(0);

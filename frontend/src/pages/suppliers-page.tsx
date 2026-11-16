@@ -1,3 +1,4 @@
+import { fetchAllRows } from "@/lib/fetch-paginated";
 import { Loader2, Pencil, RotateCcw, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import { useCallback, useEffect, useState } from "react";
@@ -16,7 +17,6 @@ import {
 } from "@/components/ui/table";
 import {
   apiDeleteJsonAuthed,
-  apiGetJsonAuthedWithMeta,
   apiPatchJsonAuthed,
   apiPostJsonAuthed,
   getStoredAccessToken,
@@ -69,7 +69,7 @@ export function SuppliersPage() {
       // Inactive suppliers stay listed here — this is the screen where you would
       // notice one was retired and put it back. They are filtered out of purchase
       // entry instead, which is where offering them would cause harm.
-      const { data } = await apiGetJsonAuthedWithMeta<Supplier[]>("/api/v1/suppliers?limit=200");
+      const data = await fetchAllRows<Supplier>("/api/v1/suppliers");
       setRows(data);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not load suppliers");

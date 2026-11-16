@@ -293,13 +293,38 @@ export async function listFlavours(query: Record<string, unknown>) {
   return { items, meta: buildMeta(page, limit, total) };
 }
 
+/**
+ * Find-or-create. Flavours are shared reference data, so asking for one that
+ * already exists (in any letter case) hands back that row instead of failing —
+ * the caller just wants it selectable. Previously a duplicate hit the unique
+ * index and surfaced as a 500.
+ */
 export async function createFlavour(input: { name: string; sortOrder?: number }) {
-  return prisma.flavour.create({
-    data: {
-      name: input.name.trim(),
-      sortOrder: input.sortOrder ?? 0,
-    },
+  const name = input.name.trim();
+  if (!name) {
+    throw new AppError(400, "FLAVOUR_NAME_REQUIRED", "Flavour name is required");
+  }
+  const existing = await prisma.flavour.findFirst({
+    where: { name: { equals: name, mode: "insensitive" } },
   });
+  if (existing) return existing;
+  try {
+    return await prisma.flavour.create({
+      data: { name, sortOrder: input.sortOrder ?? 0 },
+    });
+  } catch (e: unknown) {
+    const code =
+      typeof e === "object" && e !== null && "code" in e
+        ? String((e as { code?: string }).code)
+        : "";
+    if (code === "P2002") {
+      // Lost a race with a concurrent create of the same name.
+      const row = await prisma.flavour.findUnique({ where: { name } });
+      if (row) return row;
+      throw new AppError(409, "FLAVOUR_EXISTS", `Flavour "${name}" already exists`);
+    }
+    throw e;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +439,12 @@ export async function createBrand(input: {
   if (!isValidSlug(slug)) {
     throw new AppError(400, "INVALID_SLUG", "Invalid slug format");
   }
+  // Same find-or-create rule as flavours: re-adding an existing brand name
+  // (any case) returns it so the inline "add brand" flow just selects it.
+  const existing = await prisma.brand.findFirst({
+    where: { name: { equals: input.name.trim(), mode: "insensitive" } },
+  });
+  if (existing) return existing;
   try {
     return await prisma.brand.create({
       data: {
