@@ -1,6 +1,12 @@
-const BASE_URL = "https://live-mt-server.wati.io/10210501";
-// From screenshot:
-const TOKEN = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI1ODNmODIxZGFjZGE5Y2hlbW1pY3J2c29mdC5jb20iLCJhdWQiOiJhdHRpcmVieWd2LmNvbSIsImlzcyI6Imh0dHA6Ly92MmhibWFzLm1pY3Jvc29mdC5jb20iLCJleHAiOjE4MDcwODg1MjksIm5ibSI6MTcwNzg4ODUyOX0.UkFUT1IiLCJleHAiOjE1MzQwMjMwMDgwMCwiaXNzIioiQ2VfQUkiLCJhdWQiOiQ2VfQUkiLCJhdWQiOiJDbGFyY2V9BSSJ9.bMTflYaPG0El-4uRaC71OLr29ocaF0GkfcXt1AU";
+// Credentials come from the environment — never hardcode them here.
+//   WATI_BASE_URL=... WATI_ACCESS_TOKEN=... npx tsx scripts/test-wati-live.ts
+const BASE_URL = process.env.WATI_BASE_URL ?? "";
+const RAW_TOKEN = process.env.WATI_ACCESS_TOKEN ?? "";
+if (!BASE_URL || !RAW_TOKEN) {
+  console.error("Set WATI_BASE_URL and WATI_ACCESS_TOKEN before running this script.");
+  process.exit(1);
+}
+const TOKEN = RAW_TOKEN.startsWith("Bearer ") ? RAW_TOKEN : `Bearer ${RAW_TOKEN}`;
 
 async function fetchWati(path: string, options: RequestInit = {}) {
   const url = `${BASE_URL}${path}`;

@@ -519,7 +519,6 @@ export async function sendInvoiceForOrder(input: {
       orderId,
       phone,
       providerMessageId: extractProviderMessageId(res.body),
-      watiResponse: res.body,
     },
     "WATI WhatsApp invoice API accepted",
   );
