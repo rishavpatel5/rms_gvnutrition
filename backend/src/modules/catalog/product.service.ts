@@ -287,6 +287,8 @@ export async function listFlavours(query: Record<string, unknown>) {
       skip,
       take: limit,
       orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+      // Usage count so the UI can say "used by N items" before a rename/delete.
+      include: { _count: { select: { variants: true } } },
     }),
     prisma.flavour.count({ where }),
   ]);
@@ -325,6 +327,119 @@ export async function createFlavour(input: { name: string; sortOrder?: number })
     }
     throw e;
   }
+}
+
+/**
+ * Rename (fix spelling / casing). Existing variant SKUs are deliberately left
+ * alone — they're printed on stock labels — only the displayed name changes.
+ * A case-only change to the same row ("UNFLAVOURED" → "Unflavoured") is allowed;
+ * colliding with a *different* flavour is refused, because that's a merge.
+ */
+export async function updateFlavour(id: string, input: { name: string }) {
+  const name = input.name.trim();
+  if (!name) {
+    throw new AppError(400, "FLAVOUR_NAME_REQUIRED", "Flavour name is required");
+  }
+  const current = await prisma.flavour.findUnique({ where: { id } });
+  if (!current) throw new AppError(404, "FLAVOUR_NOT_FOUND", "Flavour not found");
+
+  const clash = await prisma.flavour.findFirst({
+    where: { id: { not: id }, name: { equals: name, mode: "insensitive" } },
+  });
+  if (clash) {
+    throw new AppError(
+      409,
+      "FLAVOUR_EXISTS",
+      `"${clash.name}" already exists — use Merge to combine them instead of renaming.`,
+    );
+  }
+  try {
+    return await prisma.flavour.update({
+      where: { id },
+      data: { name },
+      include: { _count: { select: { variants: true } } },
+    });
+  } catch (e: unknown) {
+    const code =
+      typeof e === "object" && e !== null && "code" in e
+        ? String((e as { code?: string }).code)
+        : "";
+    if (code === "P2002") {
+      throw new AppError(409, "FLAVOUR_EXISTS", `Flavour "${name}" already exists`);
+    }
+    throw e;
+  }
+}
+
+/**
+ * Delete a flavour. If items still use it, the caller must pass `mergeInto`:
+ * those items are moved to that flavour first (same product/brand/pack size/SKU/
+ * stock — only the flavour label changes), then this one is removed.
+ *
+ * A merge that would leave two items of the same product + brand + pack size
+ * with the same flavour is refused: they'd be indistinguishable at the counter.
+ */
+export async function deleteFlavour(id: string, opts: { mergeInto?: string | null }) {
+  const mergeInto = opts.mergeInto?.trim() || null;
+  if (mergeInto === id) {
+    throw new AppError(400, "FLAVOUR_MERGE_SELF", "Cannot merge a flavour into itself");
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const source = await tx.flavour.findUnique({ where: { id } });
+    if (!source) throw new AppError(404, "FLAVOUR_NOT_FOUND", "Flavour not found");
+
+    const used = await tx.productVariant.findMany({
+      where: { flavourId: id },
+      select: {
+        id: true,
+        productId: true,
+        brandId: true,
+        packSizeId: true,
+        product: { select: { name: true } },
+      },
+    });
+
+    if (used.length > 0 && !mergeInto) {
+      throw new AppError(
+        409,
+        "FLAVOUR_IN_USE",
+        `"${source.name}" is used by ${used.length} item${used.length === 1 ? "" : "s"}. Merge it into another flavour instead.`,
+      );
+    }
+
+    let moved = 0;
+    if (mergeInto && used.length > 0) {
+      const target = await tx.flavour.findUnique({ where: { id: mergeInto } });
+      if (!target) {
+        throw new AppError(404, "FLAVOUR_NOT_FOUND", "Flavour to merge into was not found");
+      }
+      const targetVariants = await tx.productVariant.findMany({
+        where: { flavourId: mergeInto, productId: { in: [...new Set(used.map((v) => v.productId))] } },
+        select: { productId: true, brandId: true, packSizeId: true },
+      });
+      const comboKey = (v: { productId: string; brandId: string | null; packSizeId: string | null }) =>
+        `${v.productId}|${v.brandId ?? ""}|${v.packSizeId ?? ""}`;
+      const taken = new Set(targetVariants.map(comboKey));
+      const collisions = used.filter((v) => taken.has(comboKey(v)));
+      if (collisions.length > 0) {
+        const names = [...new Set(collisions.map((c) => c.product.name))].slice(0, 5).join(", ");
+        throw new AppError(
+          409,
+          "FLAVOUR_MERGE_CONFLICT",
+          `Can't merge: ${collisions.length} item${collisions.length === 1 ? "" : "s"} already exist${collisions.length === 1 ? "s" : ""} as "${target.name}" with the same brand and pack size (${names}). Remove or edit those items first.`,
+        );
+      }
+      const res = await tx.productVariant.updateMany({
+        where: { flavourId: id },
+        data: { flavourId: mergeInto },
+      });
+      moved = res.count;
+    }
+
+    await tx.flavour.delete({ where: { id } });
+    return { deleted: true as const, moved };
+  });
 }
 
 // ---------------------------------------------------------------------------

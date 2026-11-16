@@ -8,6 +8,7 @@ import {
   createPackSizeBodySchema,
   createProductBodySchema,
   createVariantBodySchema,
+  updateFlavourBodySchema,
   updateProductBodySchema,
   updateVariantBodySchema,
 } from "./catalog.validators.js";
@@ -90,6 +91,20 @@ export const catalogController = {
     const body = parseBody(createFlavourBodySchema, req.body);
     const row = await productService.createFlavour(body);
     res.status(201).json({ data: row });
+  },
+
+  async updateFlavour(req: Request, res: Response): Promise<void> {
+    const body = parseBody(updateFlavourBodySchema, req.body);
+    const row = await productService.updateFlavour(req.params.flavourId!, body);
+    res.json({ data: row });
+  },
+
+  async deleteFlavour(req: Request, res: Response): Promise<void> {
+    const q = getQueryRecord(req);
+    const out = await productService.deleteFlavour(req.params.flavourId!, {
+      mergeInto: typeof q.mergeInto === "string" ? q.mergeInto : null,
+    });
+    res.json({ data: out });
   },
 
   async listPackSizes(req: Request, res: Response): Promise<void> {

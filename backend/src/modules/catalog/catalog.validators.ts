@@ -68,6 +68,10 @@ export const createFlavourBodySchema = z.object({
   sortOrder: z.number().int().min(0).max(1_000_000).optional(),
 });
 
+export const updateFlavourBodySchema = z.object({
+  name: z.string().trim().min(1).max(120),
+});
+
 /**
  * Pack sizes are shared rows, not per-product free text. `normalizedValue` is the
  * magnitude in the measure's base unit (grams / millilitres / pieces) and exists
