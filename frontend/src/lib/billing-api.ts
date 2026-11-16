@@ -1,6 +1,6 @@
+import { fetchAllRows } from "./fetch-paginated";
 import {
   apiDeleteAuthed,
-  apiGetJsonAuthed,
   apiPatchJsonAuthed,
   apiPostJsonAuthed,
   getStoredAccessToken,
@@ -86,9 +86,7 @@ type RawCatalogVariant = {
 export async function fetchProductVariantsForCorrection(
   productId: string,
 ): Promise<CorrectableVariant[]> {
-  const rows = await apiGetJsonAuthed<RawCatalogVariant[]>(
-    `/api/v1/catalog/products/${encodeURIComponent(productId)}/variants?limit=200`,
-  );
+  const rows = await fetchAllRows<RawCatalogVariant>(`/api/v1/catalog/products/${encodeURIComponent(productId)}/variants`);
   return rows
     .filter((v) => v.isActive)
     .map((v) => ({

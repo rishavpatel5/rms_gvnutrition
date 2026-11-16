@@ -37,12 +37,11 @@ import {
   apiDeleteAuthed,
   apiDeleteJsonAuthed,
   apiGetJsonAuthed,
-  apiGetJsonAuthedWithMeta,
   apiPatchJsonAuthed,
   apiPostJsonAuthed,
   getStoredAccessToken,
 } from "@/lib/api-client";
-import { fetchAllPaginated } from "@/lib/fetch-paginated";
+import { fetchAllPaginated, fetchAllRows } from "@/lib/fetch-paginated";
 import { kindLabel, splitByProductKind } from "@/lib/product-kind";
 import { cn } from "@/lib/utils";
 
@@ -218,9 +217,7 @@ function ProductSkuDialog({
     void (async () => {
       setLoading(true);
       try {
-        const { data } = await apiGetJsonAuthedWithMeta<SkuVariant[]>(
-          `/api/v1/catalog/products/${product.id}/variants?limit=200`,
-        );
+        const data = await fetchAllRows<SkuVariant>(`/api/v1/catalog/products/${product.id}/variants`);
         if (!cancelled) setVariants(data);
       } catch (e) {
         if (!cancelled) toast.error(e instanceof Error ? e.message : "Failed to load variants");
@@ -1006,13 +1003,13 @@ export function CatalogPage() {
     setLoadingRef(true);
     try {
       const [col, siz, brs] = await Promise.all([
-        apiGetJsonAuthedWithMeta<Flavour[]>("/api/v1/catalog/reference/flavours?limit=200"),
-        apiGetJsonAuthedWithMeta<PackSize[]>("/api/v1/catalog/reference/pack-sizes?limit=200"),
-        apiGetJsonAuthedWithMeta<BrandRef[]>("/api/v1/catalog/reference/brands?limit=200"),
+        fetchAllRows<Flavour>("/api/v1/catalog/reference/flavours"),
+        fetchAllRows<PackSize>("/api/v1/catalog/reference/pack-sizes"),
+        fetchAllRows<BrandRef>("/api/v1/catalog/reference/brands"),
       ]);
-      setColors(col.data);
-      setSizes(siz.data);
-      setBrandOptions(brs.data);
+      setColors(col);
+      setSizes(siz);
+      setBrandOptions(brs);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to load reference data");
     } finally {
@@ -1031,13 +1028,13 @@ export function CatalogPage() {
    */
   const refreshReference = useCallback(async () => {
     const [fl, ps, br] = await Promise.all([
-      apiGetJsonAuthedWithMeta<Flavour[]>("/api/v1/catalog/reference/flavours?limit=200"),
-      apiGetJsonAuthedWithMeta<PackSize[]>("/api/v1/catalog/reference/pack-sizes?limit=200"),
-      apiGetJsonAuthedWithMeta<BrandRef[]>("/api/v1/catalog/reference/brands?limit=200"),
+      fetchAllRows<Flavour>("/api/v1/catalog/reference/flavours"),
+      fetchAllRows<PackSize>("/api/v1/catalog/reference/pack-sizes"),
+      fetchAllRows<BrandRef>("/api/v1/catalog/reference/brands"),
     ]);
-    setColors(fl.data);
-    setSizes(ps.data);
-    setBrandOptions(br.data);
+    setColors(fl);
+    setSizes(ps);
+    setBrandOptions(br);
   }, []);
 
   useEffect(() => {
@@ -1066,7 +1063,7 @@ export function CatalogPage() {
   };
 
   async function refreshColors(): Promise<Flavour[]> {
-    const { data } = await apiGetJsonAuthedWithMeta<Flavour[]>("/api/v1/catalog/reference/flavours?limit=200");
+    const data = await fetchAllRows<Flavour>("/api/v1/catalog/reference/flavours");
     setColors(data);
     return data;
   }
@@ -1080,9 +1077,7 @@ export function CatalogPage() {
     setSheetBrandBusy(true);
     try {
       const created = await apiPostJsonAuthed<{ id: string }>("/api/v1/catalog/reference/brands", { name });
-      const { data } = await apiGetJsonAuthedWithMeta<BrandRef[]>(
-        "/api/v1/catalog/reference/brands?limit=200",
-      );
+      const data = await fetchAllRows<BrandRef>("/api/v1/catalog/reference/brands");
       setBrandOptions(data);
       setPBrandId(created.id);
       setSheetBrandOpen(false);
@@ -1095,7 +1090,7 @@ export function CatalogPage() {
   }
 
   async function refreshSizes(): Promise<PackSize[]> {
-    const { data } = await apiGetJsonAuthedWithMeta<PackSize[]>("/api/v1/catalog/reference/pack-sizes?limit=200");
+    const data = await fetchAllRows<PackSize>("/api/v1/catalog/reference/pack-sizes");
     setSizes(data);
     return data;
   }
