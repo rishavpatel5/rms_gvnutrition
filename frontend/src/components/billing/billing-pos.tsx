@@ -17,7 +17,7 @@ import { FlavourLabel } from "@/components/catalog/flavour-label";
 import { PosCartSummary } from "@/components/billing/pos-cart-summary";
 import { PosCheckoutCustomerBlock } from "@/components/billing/pos-checkout-customer";
 import { PosLineDiscount } from "@/components/billing/pos-line-discount";
-import { PosLineGiveaway } from "@/components/billing/pos-line-giveaway";
+import { PosLineGiveaway, PosLineGiveawayReason } from "@/components/billing/pos-line-giveaway";
 import { useBillingQuote } from "@/hooks/use-billing-quote";
 import { MarginHint, MarginSummary, VariantCostLine } from "@/components/billing/margin-hint";
 import { Badge } from "@/components/ui/badge";
@@ -28,14 +28,6 @@ import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { istYmd } from "@/lib/ist-time";
 import {
@@ -45,6 +37,7 @@ import {
 } from "@/lib/api-client";
 import {
   buildPosCheckoutPayload,
+  lineItemDiscountAmount,
   type PaymentMethod,
   useBillingStore,
 } from "@/stores/billing-store";
@@ -600,63 +593,93 @@ export function BillingPos() {
                 <span className="text-sm font-semibold">Current bill</span>
                 <span className="text-xs text-muted-foreground">{lines.length} lines</span>
               </div>
-              <ScrollArea className="h-[min(40vh,320px)] pr-2">
+              <ScrollArea className="h-[min(56vh,480px)] pr-2">
                 {lines.length === 0 ? (
                   <p className="py-8 text-center text-sm text-muted-foreground">
                     No lines yet — scan or search to add.
                   </p>
                 ) : (
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Item</TableHead>
-                        <TableHead className="w-[100px] text-right">Qty</TableHead>
-                        <TableHead className="w-10" />
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {lines.map((l) => (
-                        <TableRow key={l.id}>
-                          <TableCell>
-                            <div className="text-sm font-medium leading-tight">{l.name}</div>
-                            <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-                              <BrandTag brand={l.brandName} />
-                              <FlavourLabel flavour={l.flavourName}>{l.variantLabel}</FlavourLabel>
+                  <div className="space-y-2.5">
+                    {lines.map((l) => {
+                      const gross = l.qty * l.unitPrice;
+                      const lineTotal = l.isGiveaway ? 0 : gross - lineItemDiscountAmount(l);
+                      const discounted = lineTotal < gross - 0.005;
+                      return (
+                        <div
+                          key={l.id}
+                          className={cn(
+                            "space-y-3 rounded-xl border bg-card p-3",
+                            l.isGiveaway
+                              ? "border-amber-300/70 bg-amber-50/40 dark:border-amber-500/40 dark:bg-amber-500/5"
+                              : "border-border/70",
+                          )}
+                        >
+                          {/* Header: name + line total + remove */}
+                          <div className="flex items-start gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm font-semibold leading-tight" title={l.name}>
+                                {l.name}
+                              </div>
+                              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                                <BrandTag brand={l.brandName} />
+                                <FlavourLabel flavour={l.flavourName}>{l.variantLabel}</FlavourLabel>
+                              </div>
                             </div>
+                            <div className="shrink-0 text-right tabular-nums">
+                              <div
+                                className={cn(
+                                  "text-sm font-semibold",
+                                  l.isGiveaway && "text-amber-700 dark:text-amber-400",
+                                )}
+                              >
+                                {l.isGiveaway ? "FREE" : money(lineTotal)}
+                              </div>
+                              {discounted ? (
+                                <div className="text-[11px] text-muted-foreground line-through">
+                                  {money(gross)}
+                                </div>
+                              ) : null}
+                            </div>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="-mr-1 -mt-1 size-8 shrink-0 text-muted-foreground hover:text-destructive"
+                              aria-label="Remove line"
+                              onClick={() => removeLine(l.id)}
+                            >
+                              <Trash2 className="size-4" />
+                            </Button>
+                          </div>
+
+                          {/* Meta: unit price, stock, margin */}
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs tabular-nums text-muted-foreground">
+                            <span>{money(l.unitPrice)} each</span>
+                            <span>{l.availableStock} in stock</span>
                             {!l.isGiveaway && (l.unitCost ?? 0) > 0 ? (
-                              <div className="mt-0.5 text-[11px]">
+                              <span className="text-[11px]">
                                 <MarginHint
                                   taxable={lineTaxableById.get(l.variantId) ?? 0}
                                   cost={lineCostById.get(l.variantId) ?? 0}
                                 />
-                              </div>
+                              </span>
                             ) : null}
-                            <div className="mt-1 text-xs tabular-nums text-muted-foreground">
-                              {l.isGiveaway ? (
-                                <span className="font-medium text-amber-700 dark:text-amber-400">
-                                  FREE · was {money(l.unitPrice)}
-                                </span>
-                              ) : (
-                                <span>
-                                  {money(l.unitPrice)} each · avail {l.availableStock}
-                                </span>
-                              )}
-                            </div>
-                            <PosLineGiveaway line={l} />
-                            <PosLineDiscount line={l} />
-                          </TableCell>
-                          <TableCell className="text-right">
-                            <div className="inline-flex items-center gap-1 rounded-lg border border-border/80 p-0.5">
+                          </div>
+
+                          {/* Controls: qty + giveaway */}
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="inline-flex items-center gap-1 rounded-lg border border-border/80 bg-background p-0.5">
                               <Button
                                 type="button"
                                 variant="ghost"
                                 size="icon"
                                 className="size-7 rounded-md"
+                                aria-label="Decrease quantity"
                                 onClick={() => setQty(l.id, l.qty - 1)}
                               >
                                 <Minus className="size-3.5" />
                               </Button>
-                              <span className="min-w-[1.5rem] text-center text-sm tabular-nums">
+                              <span className="min-w-[2rem] text-center text-sm font-medium tabular-nums">
                                 {l.qty}
                               </span>
                               <Button
@@ -664,28 +687,22 @@ export function BillingPos() {
                                 variant="ghost"
                                 size="icon"
                                 className="size-7 rounded-md"
+                                aria-label="Increase quantity"
+                                disabled={l.qty >= l.availableStock}
                                 onClick={() => setQty(l.id, l.qty + 1)}
                               >
                                 <Plus className="size-3.5" />
                               </Button>
                             </div>
-                          </TableCell>
-                          <TableCell>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="size-8 text-muted-foreground hover:text-destructive"
-                              aria-label="Remove line"
-                              onClick={() => removeLine(l.id)}
-                            >
-                              <Trash2 className="size-4" />
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
+                            <PosLineGiveaway line={l} />
+                          </div>
+
+                          <PosLineGiveawayReason line={l} />
+                          <PosLineDiscount line={l} />
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
               </ScrollArea>
               <PosCheckoutCustomerBlock />

@@ -34,9 +34,73 @@ export type BillingLine = {
   igstRate: number;
   itemDiscountType: RetailDiscountType | null;
   itemDiscountValue: number | null;
+  /**
+   * Per-unit price the cashier negotiated via "Sell at". While set, the line
+   * discount is re-derived on qty changes so the per-unit price holds
+   * (1 × ₹3000 → 3 × ₹3000 = ₹9000). Cleared by any manual discount edit.
+   */
+  negotiatedUnitPrice: number | null;
   isGiveaway: boolean;
   giveawayReason: string | null;
 };
+
+const round = (n: number, dp: number) => {
+  const f = 10 ** dp;
+  return Math.round(n * f) / f;
+};
+
+/**
+ * Rupee item discount on the whole line, mirroring backend `resolveItemDiscountAmount`:
+ * flat is a line-level amount, percent applies to qty × unitPrice; capped at gross.
+ */
+export function lineItemDiscountAmount(
+  l: Pick<BillingLine, "qty" | "unitPrice" | "itemDiscountType" | "itemDiscountValue" | "isGiveaway">,
+): number {
+  const gross = l.qty * l.unitPrice;
+  const v = l.itemDiscountValue ?? 0;
+  if (l.isGiveaway || !l.itemDiscountType || v <= 0 || gross <= 0) return 0;
+  const amt = l.itemDiscountType === "PERCENT" ? (gross * v) / 100 : v;
+  return Math.min(Math.max(amt, 0), gross);
+}
+
+/**
+ * Discount (in the given mode) that makes `qty × unitPrice` come to `total`.
+ * A total at or above the gross means no discount.
+ */
+function discountForSellingTotal(
+  unitPrice: number,
+  qty: number,
+  total: number,
+  type: RetailDiscountType,
+): Pick<BillingLine, "itemDiscountType" | "itemDiscountValue" | "negotiatedUnitPrice"> {
+  const gross = unitPrice * qty;
+  if (gross <= 0 || qty <= 0 || total >= gross) {
+    return { itemDiscountType: null, itemDiscountValue: null, negotiatedUnitPrice: null };
+  }
+  const safeTotal = Math.max(total, 0);
+  const off = gross - safeTotal;
+  return {
+    itemDiscountType: type,
+    // 4dp matches the backend's Decimal(4) storage, so % lands on the typed price.
+    itemDiscountValue: type === "PERCENT" ? round((off / gross) * 100, 4) : round(off, 2),
+    negotiatedUnitPrice: safeTotal / qty,
+  };
+}
+
+/** Re-apply a negotiated per-unit price after the line's qty changed. */
+function withQty(l: BillingLine, qty: number): BillingLine {
+  if (l.negotiatedUnitPrice == null || l.isGiveaway) return { ...l, qty };
+  return {
+    ...l,
+    qty,
+    ...discountForSellingTotal(
+      l.unitPrice,
+      qty,
+      round(l.negotiatedUnitPrice * qty, 2),
+      l.itemDiscountType ?? "FLAT_AMOUNT",
+    ),
+  };
+}
 
 type BillingState = {
   lines: BillingLine[];
@@ -80,6 +144,11 @@ type BillingState = {
     value: number,
   ) => void;
   clearLineItemDiscount: (lineId: string) => void;
+  /**
+   * Set the line's total selling price (what the customer pays for all units).
+   * Fills the discount in `type` (defaults to the line's current mode, else ₹).
+   */
+  setLineSellingTotal: (lineId: string, total: number, type?: RetailDiscountType) => void;
   setLineGiveaway: (lineId: string, isGiveaway: boolean) => void;
   setLineGiveawayReason: (lineId: string, reason: string) => void;
   setCartDiscount: (type: RetailDiscountType, value: number) => void;
@@ -88,7 +157,13 @@ type BillingState = {
   addOrIncrementLine: (
     line: Omit<
       BillingLine,
-      "id" | "qty" | "itemDiscountType" | "itemDiscountValue" | "isGiveaway" | "giveawayReason"
+      | "id"
+      | "qty"
+      | "itemDiscountType"
+      | "itemDiscountValue"
+      | "negotiatedUnitPrice"
+      | "isGiveaway"
+      | "giveawayReason"
     > & { qty?: number; isGiveaway?: boolean },
   ) => void;
   setQty: (lineId: string, qty: number) => void;
@@ -178,14 +253,32 @@ export const useBillingStore = create<BillingState>((set, get) => ({
   setLineItemDiscount: (lineId, itemDiscountType, itemDiscountValue) =>
     set({
       lines: get().lines.map((l) =>
-        l.id === lineId ? { ...l, itemDiscountType, itemDiscountValue } : l,
+        l.id === lineId
+          ? { ...l, itemDiscountType, itemDiscountValue, negotiatedUnitPrice: null }
+          : l,
       ),
     }),
   clearLineItemDiscount: (lineId) =>
     set({
       lines: get().lines.map((l) =>
         l.id === lineId
-          ? { ...l, itemDiscountType: null, itemDiscountValue: null }
+          ? { ...l, itemDiscountType: null, itemDiscountValue: null, negotiatedUnitPrice: null }
+          : l,
+      ),
+    }),
+  setLineSellingTotal: (lineId, total, type) =>
+    set({
+      lines: get().lines.map((l) =>
+        l.id === lineId && !l.isGiveaway
+          ? {
+              ...l,
+              ...discountForSellingTotal(
+                l.unitPrice,
+                l.qty,
+                total,
+                type ?? l.itemDiscountType ?? "FLAT_AMOUNT",
+              ),
+            }
           : l,
       ),
     }),
@@ -199,6 +292,7 @@ export const useBillingStore = create<BillingState>((set, get) => ({
               giveawayReason: isGiveaway ? l.giveawayReason : null,
               itemDiscountType: isGiveaway ? null : l.itemDiscountType,
               itemDiscountValue: isGiveaway ? null : l.itemDiscountValue,
+              negotiatedUnitPrice: isGiveaway ? null : l.negotiatedUnitPrice,
             }
           : l,
       ),
@@ -224,9 +318,7 @@ export const useBillingStore = create<BillingState>((set, get) => ({
     if (match) {
       set({
         lines: lines.map((l) =>
-          l.id === match.id
-            ? { ...l, qty: Math.min(l.availableStock, l.qty + addQty) }
-            : l,
+          l.id === match.id ? withQty(l, Math.min(l.availableStock, l.qty + addQty)) : l,
         ),
       });
       return;
@@ -253,6 +345,7 @@ export const useBillingStore = create<BillingState>((set, get) => ({
           igstRate: payload.igstRate,
           itemDiscountType: null,
           itemDiscountValue: null,
+          negotiatedUnitPrice: null,
           isGiveaway,
           giveawayReason: null,
         },
@@ -267,7 +360,7 @@ export const useBillingStore = create<BillingState>((set, get) => ({
     }
     set({
       lines: get().lines.map((l) =>
-        l.id === lineId ? { ...l, qty: Math.min(next, l.availableStock) } : l,
+        l.id === lineId ? withQty(l, Math.min(next, l.availableStock)) : l,
       ),
     });
   },

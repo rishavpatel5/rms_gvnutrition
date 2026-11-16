@@ -44,8 +44,10 @@ import {
 import { fetchAllPaginated, fetchAllRows } from "@/lib/fetch-paginated";
 import { kindLabel, splitByProductKind } from "@/lib/product-kind";
 import { cn } from "@/lib/utils";
+import { OptionPicker } from "@/components/catalog/option-picker";
+import { ManageFlavoursSheet } from "@/components/catalog/manage-flavours-sheet";
 
-type Flavour = { id: string; name: string };
+type Flavour = { id: string; name: string; _count?: { variants: number } };
 type PackSize = { id: string; label: string; code: string; measure: string };
 
 const KINDS = ["SUPPLEMENT", "ACCESSORY"] as const;
@@ -991,6 +993,7 @@ export function CatalogPage() {
 
 
   const [sheetFlavourOpen, setSheetFlavourOpen] = useState(false);
+  const [manageFlavoursOpen, setManageFlavoursOpen] = useState(false);
   const [newFlavourName, setNewFlavourName] = useState("");
   const [sheetFlavourBusy, setSheetFlavourBusy] = useState(false);
 
@@ -1058,9 +1061,8 @@ export function CatalogPage() {
     };
   }, [view, loadingRef]);
 
-  const toggle = (id: string, list: string[], setList: (v: string[]) => void) => {
-    setList(list.includes(id) ? list.filter((x) => x !== id) : [...list, id]);
-  };
+  const flavourOptions = colors.map((c) => ({ id: c.id, label: c.name }));
+  const sizeOptions = sizes.map((s) => ({ id: s.id, label: s.label }));
 
   async function refreshColors(): Promise<Flavour[]> {
     const data = await fetchAllRows<Flavour>("/api/v1/catalog/reference/flavours");
@@ -1706,85 +1708,62 @@ export function CatalogPage() {
 
             {pKind === "SUPPLEMENT" ? (
               <>
-                <div className="space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <Palette className="size-4 text-muted-foreground" aria-hidden />
-                      <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                        Colours
-                      </Label>
-                    </div>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="secondary"
-                      className="h-8 rounded-full gap-1 px-3 text-xs"
-                      onClick={() => setSheetFlavourOpen(true)}
-                    >
-                      <Plus className="size-3.5" />
-                      New flavour
-                    </Button>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {colors.map((c) => (
-                      <Button
-                        key={c.id}
-                        type="button"
-                        size="sm"
-                        variant={selColors.includes(c.id) ? "default" : "outline"}
-                        className="rounded-full"
-                        onClick={() => toggle(c.id, selColors, setSelColors)}
-                      >
-                        {c.name}
-                      </Button>
-                    ))}
-                  </div>
+                <OptionPicker
+                  title="Flavours"
+                  icon={<Palette className="size-4" />}
+                  options={flavourOptions}
+                  selected={selColors}
+                  onChange={setSelColors}
+                  onCreate={() => setSheetFlavourOpen(true)}
+                  createLabel="New flavour"
+                  onManage={() => setManageFlavoursOpen(true)}
+                  searchPlaceholder="Search flavours…"
+                />
+                <OptionPicker
+                  title="Pack sizes"
+                  icon={<Ruler className="size-4" />}
+                  options={sizeOptions}
+                  selected={selSizes}
+                  onChange={setSelSizes}
+                  onCreate={() => setSheetSizeOpen(true)}
+                  createLabel="New size"
+                  searchPlaceholder="Search sizes…"
+                  sortAlpha={false}
+                  compact
+                />
+                <div
+                  className={cn(
+                    "flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm",
+                    matrix.length > 0
+                      ? "border-foreground/20 bg-muted/40"
+                      : "border-dashed border-border/70 text-muted-foreground",
+                  )}
+                >
+                  <span>
+                    {matrix.length > 0 ? (
+                      <>
+                        <span className="font-semibold tabular-nums">{selColors.length}</span> flavour
+                        {selColors.length === 1 ? "" : "s"} ×{" "}
+                        <span className="font-semibold tabular-nums">{selSizes.length}</span> size
+                        {selSizes.length === 1 ? "" : "s"}
+                        {pBrandId
+                          ? ` for ${brandOptions.find((b) => b.id === pBrandId)?.name ?? "this company"}`
+                          : ""}
+                      </>
+                    ) : (
+                      "Pick at least one flavour and one pack size to create items."
+                    )}
+                  </span>
+                  {matrix.length > 0 ? (
+                    <span className="shrink-0 rounded-full bg-foreground px-2.5 py-0.5 text-xs font-semibold tabular-nums text-background">
+                      {matrix.length} item{matrix.length === 1 ? "" : "s"}
+                    </span>
+                  ) : null}
                 </div>
-                <div className="space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <Ruler className="size-4 text-muted-foreground" aria-hidden />
-                      <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                        Sizes
-                      </Label>
-                    </div>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="secondary"
-                      className="h-8 rounded-full gap-1 px-3 text-xs"
-                      onClick={() => setSheetSizeOpen(true)}
-                    >
-                      <Plus className="size-3.5" />
-                      New size
-                    </Button>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {sizes.map((s) => (
-                      <Button
-                        key={s.id}
-                        type="button"
-                        size="sm"
-                        variant={selSizes.includes(s.id) ? "default" : "outline"}
-                        className="rounded-full"
-                        onClick={() => toggle(s.id, selSizes, setSelSizes)}
-                      >
-                        {s.label}
-                      </Button>
-                    ))}
-                  </div>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  {matrix.length} item{matrix.length === 1 ? "" : "s"} will be created
-                  {pBrandId
-                    ? ` for ${brandOptions.find((b) => b.id === pBrandId)?.name ?? "this company"}`
-                    : ""}
-                  .
-                </p>
                 {matrix.length > 0 ? (
-                  <div className="overflow-x-auto rounded-lg border border-border/60">
+                  <div className="max-h-72 overflow-auto rounded-xl border border-border/60 bg-background">
                     <table className="w-full min-w-[320px] text-left text-xs">
-                      <thead className="border-b border-border/60 bg-muted/40 text-muted-foreground">
+                      <thead className="sticky top-0 border-b border-border/60 bg-muted text-muted-foreground">
                         <tr>
                           <th className="px-2 py-2 font-medium">Company</th>
                           <th className="px-2 py-2 font-medium">Flavour / pack size</th>
@@ -1818,40 +1797,18 @@ export function CatalogPage() {
                 ) : null}
               </>
             ) : (
-              <div className="space-y-6">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    Optional colour
-                  </Label>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="secondary"
-                    className="h-8 rounded-full gap-1 px-3 text-xs"
-                    onClick={() => setSheetFlavourOpen(true)}
-                  >
-                    <Plus className="size-3.5" />
-                    New flavour
-                  </Button>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                    <Button type="button" size="sm" variant="outline" onClick={() => setSelColors([])}>
-                      None
-                    </Button>
-                    {colors.map((c) => (
-                      <Button
-                        key={c.id}
-                        type="button"
-                        size="sm"
-                        variant={selColors[0] === c.id ? "default" : "outline"}
-                        className="rounded-full"
-                        onClick={() => setSelColors([c.id])}
-                      >
-                        {c.name}
-                      </Button>
-                    ))}
-                  </div>
-              </div>
+              <OptionPicker
+                title="Flavour (optional)"
+                icon={<Palette className="size-4" />}
+                options={flavourOptions}
+                selected={selColors}
+                onChange={setSelColors}
+                mode="single"
+                onCreate={() => setSheetFlavourOpen(true)}
+                createLabel="New flavour"
+                onManage={() => setManageFlavoursOpen(true)}
+                searchPlaceholder="Search flavours…"
+              />
             )}
             <Separator className="my-2" />
             <div className="flex flex-wrap justify-between gap-3 pt-2">
@@ -2011,6 +1968,23 @@ export function CatalogPage() {
               </div>
             </div>
           </div>
+
+          <ManageFlavoursSheet
+            open={manageFlavoursOpen}
+            onOpenChange={setManageFlavoursOpen}
+            flavours={colors}
+            onChanged={async ({ deletedId, mergedInto }) => {
+              await refreshColors();
+              if (deletedId) {
+                // Keep the current selection valid: a merged flavour is swapped for its target.
+                setSelColors((prev) => {
+                  if (!prev.includes(deletedId)) return prev;
+                  const rest = prev.filter((id) => id !== deletedId);
+                  return mergedInto && !rest.includes(mergedInto) ? [...rest, mergedInto] : rest;
+                });
+              }
+            }}
+          />
 
           <Sheet open={sheetFlavourOpen} onOpenChange={setSheetFlavourOpen}>
             <SheetContent side="right" className="sm:max-w-md">

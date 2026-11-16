@@ -83,6 +83,16 @@ catalogRouter.post(
   ...write,
   asyncHandler((req, res) => catalogController.createFlavour(req, res)),
 );
+catalogRouter.patch(
+  "/reference/flavours/:flavourId",
+  ...write,
+  asyncHandler((req, res) => catalogController.updateFlavour(req, res)),
+);
+catalogRouter.delete(
+  "/reference/flavours/:flavourId",
+  ...write,
+  asyncHandler((req, res) => catalogController.deleteFlavour(req, res)),
+);
 catalogRouter.get(
   "/reference/pack-sizes",
   ...read,
