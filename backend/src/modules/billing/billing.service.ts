@@ -15,6 +15,7 @@ import { buildMeta, parsePagination } from "../../lib/pagination.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   applyInventoryMovement,
+  applyInventoryMovementsBatch,
   type Tx,
 } from "../inventory/inventory.service.js";
 import { computeLine, computeOrderTotals, type ComputedLine } from "../../lib/gst-calculator.js";
@@ -199,18 +200,18 @@ async function applySaleOutForOrder(
   lines: { variantId: string; quantity: number }[],
   createdById: string | null,
 ): Promise<void> {
-  const sorted = [...lines].sort((a, b) => a.variantId.localeCompare(b.variantId));
-  for (const ln of sorted) {
-    await applyInventoryMovement(tx, {
+  await applyInventoryMovementsBatch(
+    tx,
+    lines.map((ln) => ({
       variantId: ln.variantId,
       quantityDelta: -ln.quantity,
-      movementType: "SALE_OUT",
+      movementType: "SALE_OUT" as const,
       referenceKind: InventoryReferenceKind.ORDER,
       referenceId: orderId,
       createdById,
       metadata: { orderId },
-    });
-  }
+    })),
+  );
 }
 
 async function applySaleReversalForCreditNote(
@@ -219,18 +220,18 @@ async function applySaleReversalForCreditNote(
   lines: { variantId: string; quantity: number }[],
   createdById: string | null,
 ): Promise<void> {
-  const sorted = [...lines].sort((a, b) => a.variantId.localeCompare(b.variantId));
-  for (const ln of sorted) {
-    await applyInventoryMovement(tx, {
+  await applyInventoryMovementsBatch(
+    tx,
+    lines.map((ln) => ({
       variantId: ln.variantId,
       quantityDelta: ln.quantity,
-      movementType: "SALE_REVERSAL_IN",
+      movementType: "SALE_REVERSAL_IN" as const,
       referenceKind: InventoryReferenceKind.ORDER,
       referenceId: creditNoteId,
       createdById,
       metadata: { creditNoteId },
-    });
-  }
+    })),
+  );
 }
 
 async function applySaleReversalForVoid(
@@ -239,18 +240,18 @@ async function applySaleReversalForVoid(
   lines: { variantId: string; quantity: number }[],
   createdById: string | null,
 ): Promise<void> {
-  const sorted = [...lines].sort((a, b) => a.variantId.localeCompare(b.variantId));
-  for (const ln of sorted) {
-    await applyInventoryMovement(tx, {
+  await applyInventoryMovementsBatch(
+    tx,
+    lines.map((ln) => ({
       variantId: ln.variantId,
       quantityDelta: ln.quantity,
-      movementType: "SALE_REVERSAL_IN",
+      movementType: "SALE_REVERSAL_IN" as const,
       referenceKind: InventoryReferenceKind.ORDER,
       referenceId: orderId,
       createdById,
       metadata: { voidedOrderId: orderId },
-    });
-  }
+    })),
+  );
 }
 
 /** Void a confirmed sale: restore stock, exclude from revenue/analytics, keep invoice for audit. */
@@ -513,7 +514,7 @@ export async function checkoutPos(input: {
         confirmedAt,
         offerId: body.offerId ?? null,
         items: {
-          create: await mapPricingLinesToOrderItems(tx, pricing.lines),
+          createMany: { data: await mapPricingLinesToOrderItems(tx, pricing.lines) },
         },
         payments: {
           create: payments.map((p) => ({
@@ -575,7 +576,7 @@ export async function createDraftOrder(input: {
         createdById,
         offerId: body.offerId ?? null,
         items: {
-          create: await mapPricingLinesToOrderItems(tx, pricing.lines),
+          createMany: { data: await mapPricingLinesToOrderItems(tx, pricing.lines) },
         },
       },
       select: { id: true },
@@ -1002,7 +1003,7 @@ export async function createExchange(input: {
         createdById,
         confirmedAt: new Date(),
         items: {
-          create: await mapPricingLinesToOrderItems(tx, pricing.lines),
+          createMany: { data: await mapPricingLinesToOrderItems(tx, pricing.lines) },
         },
         payments: {
           create: payments.map((p) => ({

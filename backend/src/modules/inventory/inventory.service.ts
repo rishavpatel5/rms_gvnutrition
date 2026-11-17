@@ -116,6 +116,70 @@ export async function applyInventoryMovement(
   });
 }
 
+export type InventoryMovementInput = Parameters<typeof applyInventoryMovement>[1];
+
+/**
+ * Batched equivalent of calling applyInventoryMovement once per line, in a fixed number
+ * of round-trips (3) regardless of line count. Large bills previously issued 3 queries
+ * per line sequentially and blew through the interactive-transaction timeout.
+ *
+ * Deltas are netted per variant for the balance update + stock check; one log row is
+ * still written per input movement. Call only inside a transaction.
+ */
+export async function applyInventoryMovementsBatch(
+  tx: Tx,
+  movements: InventoryMovementInput[],
+): Promise<void> {
+  if (movements.length === 0) return;
+  for (const m of movements) {
+    assertDeltaMatchesMovementType(m.movementType, m.quantityDelta);
+  }
+
+  const net = new Map<string, number>();
+  for (const m of movements) {
+    net.set(m.variantId, (net.get(m.variantId) ?? 0) + m.quantityDelta);
+  }
+  // Deterministic order (same as the per-line path) to reduce deadlock risk.
+  const variantIds = [...net.keys()].sort();
+  const deltas = variantIds.map((id) => net.get(id)!);
+
+  await tx.inventoryBalance.createMany({
+    data: variantIds.map((variantId) => ({ variantId, quantity: 0 })),
+    skipDuplicates: true,
+  });
+
+  // Atomic increment; outbound nets must not take stock below zero (same rule as
+  // applyInventoryMovement's `quantity >= -delta` guard).
+  const updatedRows = await tx.$queryRaw<{ variant_id: string }[]>`
+    UPDATE inventory_balances AS b
+    SET quantity = b.quantity + v.delta, updated_at = NOW()
+    FROM UNNEST(${variantIds}::text[], ${deltas}::int[]) AS v(variant_id, delta)
+    WHERE b.variant_id = v.variant_id
+      AND (v.delta >= 0 OR b.quantity + v.delta >= 0)
+    RETURNING b.variant_id
+  `;
+  if (updatedRows.length !== variantIds.length) {
+    const ok = new Set(updatedRows.map((r) => r.variant_id));
+    const failed = variantIds.find((id) => !ok.has(id));
+    throw new AppError(409, "INSUFFICIENT_STOCK", "Insufficient stock for this variant", {
+      variantId: failed,
+    });
+  }
+
+  await tx.inventoryLog.createMany({
+    data: movements.map((m) => ({
+      variantId: m.variantId,
+      quantityDelta: m.quantityDelta,
+      movementType: m.movementType,
+      referenceKind: m.referenceKind,
+      referenceId: m.referenceId,
+      note: m.note ?? null,
+      ...(m.metadata !== undefined ? { metadata: m.metadata as Prisma.InputJsonValue } : {}),
+      createdById: m.createdById,
+    })),
+  });
+}
+
 export type AdjustmentLineInput = {
   variantId: string;
   quantityDelta: number;
