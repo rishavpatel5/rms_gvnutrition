@@ -160,9 +160,39 @@ export async function applyInventoryMovementsBatch(
   `;
   if (updatedRows.length !== variantIds.length) {
     const ok = new Set(updatedRows.map((r) => r.variant_id));
-    const failed = variantIds.find((id) => !ok.has(id));
-    throw new AppError(409, "INSUFFICIENT_STOCK", "Insufficient stock for this variant", {
-      variantId: failed,
+    const failedIds = variantIds.filter((id) => !ok.has(id));
+    // Failed rows were not modified by the UPDATE, so these are the true on-hand counts.
+    const failedVariants = await tx.productVariant.findMany({
+      where: { id: { in: failedIds } },
+      select: {
+        id: true,
+        sku: true,
+        product: { select: { name: true } },
+        flavour: { select: { name: true } },
+        packSize: { select: { label: true } },
+        inventory: { select: { quantity: true } },
+      },
+    });
+    const byId = new Map(failedVariants.map((v) => [v.id, v]));
+    const shortages = failedIds.map((id) => {
+      const v = byId.get(id);
+      const name = v
+        ? [v.product.name, v.flavour?.name, v.packSize?.label].filter(Boolean).join(" · ")
+        : id;
+      return {
+        variantId: id,
+        sku: v?.sku ?? null,
+        name,
+        needed: -net.get(id)!,
+        available: v?.inventory?.quantity ?? 0,
+      };
+    });
+    const list = shortages
+      .map((s) => `${s.name} (need ${s.needed}, in stock ${s.available})`)
+      .join("; ");
+    throw new AppError(409, "INSUFFICIENT_STOCK", `Not enough stock: ${list}`, {
+      variantId: shortages[0]?.variantId,
+      shortages,
     });
   }
 
