@@ -312,8 +312,37 @@ export function BillingPos() {
     return m;
   }, [quote]);
 
+  // Live stock (from the server quote) vs total units of each variant across ALL lines,
+  // paid + FREE. The line's own availableStock is only a snapshot from when it was added.
+  const liveStockFor = useCallback(
+    (variantId: string, fallback: number) => quote?.stockByVariant?.[variantId] ?? fallback,
+    [quote],
+  );
+  const stockShortfalls = useMemo(() => {
+    const need = new Map<string, { qty: number; fallback: number; name: string }>();
+    for (const l of lines) {
+      const cur = need.get(l.variantId);
+      need.set(l.variantId, {
+        qty: (cur?.qty ?? 0) + l.qty,
+        fallback: l.availableStock,
+        name: [l.name, l.flavourName, l.variantLabel].filter(Boolean).join(" · "),
+      });
+    }
+    const out = new Map<string, { need: number; have: number; name: string }>();
+    for (const [id, n] of need) {
+      const have = liveStockFor(id, n.fallback);
+      if (n.qty > have) out.set(id, { need: n.qty, have, name: n.name });
+    }
+    return out;
+  }, [lines, liveStockFor]);
+  const variantQtyOnBill = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const l of lines) m.set(l.variantId, (m.get(l.variantId) ?? 0) + l.qty);
+    return m;
+  }, [lines]);
+
   async function completeSale() {
-    if (lines.length === 0 || !quote || saleBusy) return;
+    if (lines.length === 0 || !quote || saleBusy || stockShortfalls.size > 0) return;
     setSaleMessage(null);
     setLastSale(null);
     setSaleBusy(true);
@@ -655,7 +684,14 @@ export function BillingPos() {
                           {/* Meta: unit price, stock, margin */}
                           <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs tabular-nums text-muted-foreground">
                             <span>{money(l.unitPrice)} each</span>
-                            <span>{l.availableStock} in stock</span>
+                            {stockShortfalls.has(l.variantId) ? (
+                              <span className="font-medium text-destructive">
+                                Only {stockShortfalls.get(l.variantId)!.have} in stock · bill has{" "}
+                                {stockShortfalls.get(l.variantId)!.need}
+                              </span>
+                            ) : (
+                              <span>{liveStockFor(l.variantId, l.availableStock)} in stock</span>
+                            )}
                             {!l.isGiveaway && (l.unitCost ?? 0) > 0 ? (
                               <span className="text-[11px]">
                                 <MarginHint
@@ -688,7 +724,10 @@ export function BillingPos() {
                                 size="icon"
                                 className="size-7 rounded-md"
                                 aria-label="Increase quantity"
-                                disabled={l.qty >= l.availableStock}
+                                disabled={
+                                  (variantQtyOnBill.get(l.variantId) ?? 0) >=
+                                  liveStockFor(l.variantId, l.availableStock)
+                                }
                                 onClick={() => setQty(l.id, l.qty + 1)}
                               >
                                 <Plus className="size-3.5" />
@@ -773,11 +812,32 @@ export function BillingPos() {
                   <MarginSummary taxable={cartTaxable} cost={cartCost} gstEnabled={gstEnabled} />
                 </div>
               ) : null}
+              {stockShortfalls.size > 0 ? (
+                <div className="mb-2 rounded-lg border border-destructive/40 bg-destructive/5 p-2.5 text-xs text-destructive">
+                  <div className="mb-1 flex items-center gap-1.5 font-semibold">
+                    <AlertTriangle className="size-3.5" />
+                    Not enough stock — reduce these before completing the sale
+                  </div>
+                  <ul className="space-y-0.5">
+                    {[...stockShortfalls].map(([variantId, s]) => (
+                      <li key={variantId}>
+                        {s.name}: bill has {s.need}, only {s.have} in stock
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               <Button
                 type="button"
                 size="lg"
                 className="w-full rounded-xl text-base font-semibold"
-                disabled={lines.length === 0 || !quote || quoteLoading || saleBusy}
+                disabled={
+                  lines.length === 0 ||
+                  !quote ||
+                  quoteLoading ||
+                  saleBusy ||
+                  stockShortfalls.size > 0
+                }
                 onClick={() => void completeSale()}
               >
                 {saleBusy ? (

@@ -141,9 +141,22 @@ function resolveCheckoutConfirmedAt(saleDate?: string | null): Date {
   return resolveSaleConfirmedAt(saleDate);
 }
 
-export function quotePosCheckout(body: PosQuoteBody) {
+export async function quotePosCheckout(body: PosQuoteBody) {
   const quote = buildPosPricingQuote(body);
-  return serializePricingQuote(quote);
+  // Live on-hand stock per variant on the bill, so the POS can flag shortfalls before
+  // Complete sale (the cart's own stock figure is a snapshot from when the item was added).
+  const variantIds = [...new Set(quote.lines.map((l) => l.variantId))];
+  const balances = variantIds.length
+    ? await prisma.inventoryBalance.findMany({
+        where: { variantId: { in: variantIds } },
+        select: { variantId: true, quantity: true },
+      })
+    : [];
+  const stockByVariant: Record<string, number> = Object.fromEntries(
+    variantIds.map((id) => [id, 0]),
+  );
+  for (const b of balances) stockByVariant[b.variantId] = b.quantity;
+  return { ...serializePricingQuote(quote), stockByVariant };
 }
 
 async function assertOfferIfPresent(
