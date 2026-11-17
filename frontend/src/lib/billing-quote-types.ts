@@ -44,4 +44,6 @@ export type PosQuote = {
     value: string | null;
     amount: string;
   };
+  /** Live on-hand stock for each variant on the bill (server-side, at quote time). */
+  stockByVariant?: Record<string, number>;
 };

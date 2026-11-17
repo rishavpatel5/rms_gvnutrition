@@ -31,7 +31,7 @@ export const billingController = {
 
   async quote(req: Request, res: Response): Promise<void> {
     const body = parseBody(posQuoteBodySchema, req.body);
-    const out = billingService.quotePosCheckout(body);
+    const out = await billingService.quotePosCheckout(body);
     res.json({ data: out });
   },
 

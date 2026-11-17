@@ -87,6 +87,23 @@ function discountForSellingTotal(
   };
 }
 
+/**
+ * Units of `variantId` still free for one line: stock minus what every OTHER line of the
+ * same variant already holds. Paid and FREE lines of one variant draw on the same stock,
+ * so capping each line on its own let a bill ask for more than exists.
+ */
+export function remainingStockFor(
+  lines: BillingLine[],
+  variantId: string,
+  availableStock: number,
+  excludeLineId?: string,
+): number {
+  const used = lines
+    .filter((l) => l.variantId === variantId && l.id !== excludeLineId)
+    .reduce((sum, l) => sum + l.qty, 0);
+  return Math.max(0, availableStock - used);
+}
+
 /** Re-apply a negotiated per-unit price after the line's qty changed. */
 function withQty(l: BillingLine, qty: number): BillingLine {
   if (l.negotiatedUnitPrice == null || l.isGiveaway) return { ...l, qty };
@@ -316,13 +333,17 @@ export const useBillingStore = create<BillingState>((set, get) => ({
     );
     const addQty = payload.qty ?? 1;
     if (match) {
+      const cap = remainingStockFor(lines, match.variantId, match.availableStock, match.id);
       set({
         lines: lines.map((l) =>
-          l.id === match.id ? withQty(l, Math.min(l.availableStock, l.qty + addQty)) : l,
+          l.id === match.id ? withQty(l, Math.min(cap, l.qty + addQty)) : l,
         ),
       });
       return;
     }
+    // Paid and FREE lines of the same variant share one stock pool.
+    const remaining = remainingStockFor(lines, payload.variantId, payload.availableStock);
+    if (remaining <= 0) return;
     set({
       lines: [
         ...lines,
@@ -336,7 +357,7 @@ export const useBillingStore = create<BillingState>((set, get) => ({
           unitCost: payload.unitCost ?? 0,
           flavourName: payload.flavourName ?? null,
           sku: payload.sku,
-          qty: Math.min(payload.availableStock, addQty),
+          qty: Math.min(remaining, addQty),
           unitPrice: payload.unitPrice,
           availableStock: payload.availableStock,
           gstPricingMode: payload.gstPricingMode,
@@ -358,9 +379,12 @@ export const useBillingStore = create<BillingState>((set, get) => ({
       get().removeLine(lineId);
       return;
     }
+    const lines = get().lines;
     set({
-      lines: get().lines.map((l) =>
-        l.id === lineId ? withQty(l, Math.min(next, l.availableStock)) : l,
+      lines: lines.map((l) =>
+        l.id === lineId
+          ? withQty(l, Math.min(next, remainingStockFor(lines, l.variantId, l.availableStock, l.id)))
+          : l,
       ),
     });
   },
